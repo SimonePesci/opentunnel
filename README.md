@@ -30,7 +30,7 @@ OpenTunnel
 Usage:
   opentunnel --help
   opentunnel --version
-  opentunnel server
+  opentunnel server --listen <port>
   opentunnel expose
 ```
 
@@ -38,7 +38,7 @@ You can also run:
 
 ```sh
 cargo run -- --version
-cargo run -- server
+cargo run -- server --listen 8080
 cargo run -- expose
 ```
 
