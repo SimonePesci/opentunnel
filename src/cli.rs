@@ -1,8 +1,16 @@
 enum Command {
     Help,
     Version,
-    Server { listen_port: u16 },
-    Expose { local_port: u16 },
+    Server(ServerConfig),
+    Expose(ExposeConfig),
+}
+
+struct ServerConfig {
+    listen_port: u16,
+}
+
+struct ExposeConfig {
+    local_port: u16,
 }
 
 enum ParseError {
@@ -55,7 +63,7 @@ fn parse_command(args: &[String]) -> Result<Command, ParseError> {
         }
         [command, flag, port] if command == "server" && flag == "--listen" => {
             parse_port(port, ParseError::InvalidListenPort)
-                .map(|listen_port| Command::Server { listen_port })
+                .map(|listen_port| Command::Server(ServerConfig { listen_port }))
         }
         [command] if command == "expose" => Err(ParseError::MissingLocalPort),
         [command, flag] if command == "expose" && flag == "--local" => {
@@ -63,13 +71,12 @@ fn parse_command(args: &[String]) -> Result<Command, ParseError> {
         }
         [command, flag, port] if command == "expose" && flag == "--local" => {
             parse_port(port, ParseError::InvalidLocalPort)
-                .map(|local_port| Command::Expose { local_port })
+                .map(|local_port| Command::Expose(ExposeConfig { local_port }))
         }
         _ => Err(ParseError::UnknownCommand),
     }
 }
 
-// invalid error param makes the error depend on wether it is a Listening port error or Local port error
 fn parse_port(value: &str, invalid_error: ParseError) -> Result<u16, ParseError> {
     value.parse::<u16>().map_err(|_| invalid_error)
 }
@@ -84,13 +91,13 @@ fn run_command(command: Command) -> i32 {
             println!("opentunnel {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        Command::Server { listen_port } => {
-            println!("server will listen on port {listen_port}");
+        Command::Server(config) => {
+            println!("server will listen on port {}", config.listen_port);
             println!("networking is not implemented yet");
             0
         }
-        Command::Expose { local_port } => {
-            println!("expose will forward local port {local_port}");
+        Command::Expose(config) => {
+            println!("expose will forward local port {}", config.local_port);
             println!("networking is not implemented yet");
             0
         }
