@@ -1,0 +1,7 @@
+[package]
+name = "opentunnel"
+version = "0.1.0"
+edition = "2021"
+description = "Open-source tunneling project."
+
+[dependencies]
