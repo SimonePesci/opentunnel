@@ -5,10 +5,14 @@ enum Command {
     Expose,
 }
 
+enum ParseError {
+    UnknownCommand,
+}
+
 pub fn run(args: Vec<String>) -> i32 {
     match parse_command(args.as_slice()) {
         Ok(command) => run_command(command),
-        Err(()) => {
+        Err(ParseError::UnknownCommand) => {
             eprintln!("error: unknown command");
             eprintln!("run `opentunnel --help` for usage");
             2
@@ -16,14 +20,14 @@ pub fn run(args: Vec<String>) -> i32 {
     }
 }
 
-fn parse_command(args: &[String]) -> Result<Command, ()> {
+fn parse_command(args: &[String]) -> Result<Command, ParseError> {
     match args {
         [] => Ok(Command::Help),
         [arg] if arg == "--help" || arg == "-h" => Ok(Command::Help),
         [arg] if arg == "--version" || arg == "-V" => Ok(Command::Version),
         [command] if command == "server" => Ok(Command::Server),
         [command] if command == "expose" => Ok(Command::Expose),
-        _ => Err(()),
+        _ => Err(ParseError::UnknownCommand),
     }
 }
 
