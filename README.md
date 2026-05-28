@@ -4,8 +4,8 @@ OpenTunnel is an open-source tunneling project written in Rust. The long-term
 goal is to provide an ngrok-style workflow for exposing local services through a
 public tunnel, while keeping the codebase small enough to learn from.
 
-> Status: early restart. The current binary exposes a minimal CLI shape without
-> networking behavior.
+> Status: early restart. The server command can bind a local TCP listener, but
+> tunneling behavior is not implemented yet.
 
 ## Goals
 
@@ -42,6 +42,8 @@ cargo run -- server --listen 8080
 cargo run -- expose --local 3000
 ```
 
+The server listens on `127.0.0.1` and runs until stopped with `Ctrl-C`.
+
 ## Repository Layout
 
 ```text
@@ -49,7 +51,8 @@ opentunnel/
 ├── Cargo.toml
 └── src/
     ├── cli.rs
-    └── main.rs
+    ├── main.rs
+    └── server.rs
 ```
 
 ## Roadmap

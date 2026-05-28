@@ -92,9 +92,13 @@ fn run_command(command: Command) -> i32 {
             0
         }
         Command::Server(config) => {
-            println!("server will listen on port {}", config.listen_port);
-            println!("networking is not implemented yet");
-            0
+            match crate::server::run(config.listen_port) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("error: failed to run server: {error}");
+                    1
+                }
+            }
         }
         Command::Expose(config) => {
             println!("expose will forward local port {}", config.local_port);
