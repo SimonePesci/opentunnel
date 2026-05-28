@@ -101,9 +101,13 @@ fn run_command(command: Command) -> i32 {
             }
         }
         Command::Expose(config) => {
-            println!("expose will forward local port {}", config.local_port);
-            println!("networking is not implemented yet");
-            0
+            match crate::expose::run(config.local_port) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("error: failed to reach local service: {error}");
+                    1
+                }
+            }
         }
     }
 }
