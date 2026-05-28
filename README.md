@@ -31,7 +31,7 @@ Usage:
   opentunnel --help
   opentunnel --version
   opentunnel server --listen <port>
-  opentunnel expose
+  opentunnel expose --local <port>
 ```
 
 You can also run:
@@ -39,7 +39,7 @@ You can also run:
 ```sh
 cargo run -- --version
 cargo run -- server --listen 8080
-cargo run -- expose
+cargo run -- expose --local 3000
 ```
 
 ## Repository Layout

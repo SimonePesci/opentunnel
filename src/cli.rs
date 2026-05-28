@@ -2,12 +2,14 @@ enum Command {
     Help,
     Version,
     Server { listen_port: u16 },
-    Expose,
+    Expose { local_port: u16 },
 }
 
 enum ParseError {
     InvalidListenPort,
+    InvalidLocalPort,
     MissingListenPort,
+    MissingLocalPort,
     UnknownCommand,
 }
 
@@ -21,6 +23,16 @@ pub fn run(args: Vec<String>) -> i32 {
         }
         Err(ParseError::InvalidListenPort) => {
             eprintln!("error: listen port must be a number from 0 to 65535");
+            eprintln!("run `opentunnel --help` for usage");
+            2
+        }
+        Err(ParseError::MissingLocalPort) => {
+            eprintln!("error: expose requires `--local <port>`");
+            eprintln!("run `opentunnel --help` for usage");
+            2
+        }
+        Err(ParseError::InvalidLocalPort) => {
+            eprintln!("error: local port must be a number from 0 to 65535");
             eprintln!("run `opentunnel --help` for usage");
             2
         }
@@ -42,17 +54,24 @@ fn parse_command(args: &[String]) -> Result<Command, ParseError> {
             Err(ParseError::MissingListenPort)
         }
         [command, flag, port] if command == "server" && flag == "--listen" => {
-            parse_port(port).map(|listen_port| Command::Server { listen_port })
+            parse_port(port, ParseError::InvalidListenPort)
+                .map(|listen_port| Command::Server { listen_port })
         }
-        [command] if command == "expose" => Ok(Command::Expose),
+        [command] if command == "expose" => Err(ParseError::MissingLocalPort),
+        [command, flag] if command == "expose" && flag == "--local" => {
+            Err(ParseError::MissingLocalPort)
+        }
+        [command, flag, port] if command == "expose" && flag == "--local" => {
+            parse_port(port, ParseError::InvalidLocalPort)
+                .map(|local_port| Command::Expose { local_port })
+        }
         _ => Err(ParseError::UnknownCommand),
     }
 }
 
-fn parse_port(value: &str) -> Result<u16, ParseError> {
-    value
-        .parse::<u16>()
-        .map_err(|_| ParseError::InvalidListenPort)
+// invalid error param makes the error depend on wether it is a Listening port error or Local port error
+fn parse_port(value: &str, invalid_error: ParseError) -> Result<u16, ParseError> {
+    value.parse::<u16>().map_err(|_| invalid_error)
 }
 
 fn run_command(command: Command) -> i32 {
@@ -70,8 +89,9 @@ fn run_command(command: Command) -> i32 {
             println!("networking is not implemented yet");
             0
         }
-        Command::Expose => {
-            println!("expose mode is not implemented yet");
+        Command::Expose { local_port } => {
+            println!("expose will forward local port {local_port}");
+            println!("networking is not implemented yet");
             0
         }
     }
@@ -84,5 +104,5 @@ fn print_help() {
     println!("  opentunnel --help");
     println!("  opentunnel --version");
     println!("  opentunnel server --listen <port>");
-    println!("  opentunnel expose");
+    println!("  opentunnel expose --local <port>");
 }
