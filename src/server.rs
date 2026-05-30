@@ -26,10 +26,17 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
         return Ok(());
     }
 
-    println!(
-        "received handshake from {peer_address}: {}",
-        message.trim_end()
-    );
+    match crate::protocol::parse_handshake(message.trim_end()) {
+        Ok(crate::protocol::Handshake::Expose { local_port }) => {
+            println!("registered expose from {peer_address} for local port {local_port}");
+        }
+        Err(error) => {
+            println!(
+                "invalid handshake from {peer_address}: {}",
+                crate::protocol::describe_parse_error(error)
+            );
+        }
+    }
 
     Ok(())
 }

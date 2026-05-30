@@ -1,5 +1,6 @@
 mod cli;
 mod expose;
+mod protocol;
 mod server;
 
 fn main() {

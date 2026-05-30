@@ -13,7 +13,7 @@ pub fn run(local_port: u16, server_address: SocketAddr) -> io::Result<()> {
     let mut server_stream = TcpStream::connect_timeout(&server_address, SERVER_CONNECT_TIMEOUT)?;
 
     println!("connected to opentunnel server on {server_address}");
-    server_stream.write_all(format!("EXPOSE {local_port}\n").as_bytes())?;
+    server_stream.write_all(crate::protocol::expose_handshake(local_port).as_bytes())?;
 
     println!("sent expose handshake for local port {local_port}");
     println!("tunneling is not implemented yet");
