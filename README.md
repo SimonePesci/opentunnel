@@ -6,7 +6,8 @@ public tunnel, while keeping the codebase small enough to learn from.
 
 > Status: early restart. The server command can bind a local TCP listener, and
 > the expose command can check whether a local service and an OpenTunnel server
-> are reachable. Expose sends a small handshake that the server parses.
+> are reachable. Expose sends a small handshake that the server parses and
+> acknowledges.
 > Tunneling behavior is not implemented yet.
 
 ## Goals
@@ -47,7 +48,8 @@ cargo run -- expose --local 3000 --server 127.0.0.1:8080
 The server listens on `127.0.0.1` and runs until stopped with `Ctrl-C`.
 The expose command expects a service to already be listening on the selected
 local port and an OpenTunnel server address such as `127.0.0.1:8080`.
-After connecting, expose sends `EXPOSE <local-port>` to the server.
+After connecting, expose sends `EXPOSE <local-port>` to the server and expects
+`OK` back.
 
 ## Repository Layout
 

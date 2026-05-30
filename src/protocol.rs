@@ -14,6 +14,18 @@ pub fn expose_handshake(local_port: u16) -> String {
     format!("EXPOSE {local_port}\n")
 }
 
+pub fn ok_response() -> &'static str {
+    "OK\n"
+}
+
+pub fn error_response() -> &'static str {
+    "ERR\n"
+}
+
+pub fn is_ok_response(line: &str) -> bool {
+    line.trim_end() == "OK"
+}
+
 pub fn parse_handshake(line: &str) -> Result<Handshake, HandshakeParseError> {
     let mut parts = line.split_whitespace();
 
