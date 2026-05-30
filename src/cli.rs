@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 enum Command {
     Help,
     Version,
@@ -11,13 +13,16 @@ struct ServerConfig {
 
 struct ExposeConfig {
     local_port: u16,
+    server_address: SocketAddr,
 }
 
 enum ParseError {
     InvalidListenPort,
     InvalidLocalPort,
+    InvalidServerAddress,
     MissingListenPort,
     MissingLocalPort,
+    MissingServerAddress,
     UnknownCommand,
 }
 
@@ -41,6 +46,16 @@ pub fn run(args: Vec<String>) -> i32 {
         }
         Err(ParseError::InvalidLocalPort) => {
             eprintln!("error: local port must be a number from 0 to 65535");
+            eprintln!("run `opentunnel --help` for usage");
+            2
+        }
+        Err(ParseError::MissingServerAddress) => {
+            eprintln!("error: expose requires `--server <address>`");
+            eprintln!("run `opentunnel --help` for usage");
+            2
+        }
+        Err(ParseError::InvalidServerAddress) => {
+            eprintln!("error: server address must look like 127.0.0.1:8080");
             eprintln!("run `opentunnel --help` for usage");
             2
         }
@@ -70,8 +85,25 @@ fn parse_command(args: &[String]) -> Result<Command, ParseError> {
             Err(ParseError::MissingLocalPort)
         }
         [command, flag, port] if command == "expose" && flag == "--local" => {
-            parse_port(port, ParseError::InvalidLocalPort)
-                .map(|local_port| Command::Expose(ExposeConfig { local_port }))
+            parse_port(port, ParseError::InvalidLocalPort)?;
+            Err(ParseError::MissingServerAddress)
+        }
+        [command, local_flag, local_port, server_flag]
+            if command == "expose" && local_flag == "--local" && server_flag == "--server" =>
+        {
+            parse_port(local_port, ParseError::InvalidLocalPort)?;
+            Err(ParseError::MissingServerAddress)
+        }
+        [command, local_flag, local_port, server_flag, server_address]
+            if command == "expose" && local_flag == "--local" && server_flag == "--server" =>
+        {
+            let local_port = parse_port(local_port, ParseError::InvalidLocalPort)?;
+            let server_address = parse_server_address(server_address)?;
+
+            Ok(Command::Expose(ExposeConfig {
+                local_port,
+                server_address,
+            }))
         }
         _ => Err(ParseError::UnknownCommand),
     }
@@ -79,6 +111,12 @@ fn parse_command(args: &[String]) -> Result<Command, ParseError> {
 
 fn parse_port(value: &str, invalid_error: ParseError) -> Result<u16, ParseError> {
     value.parse::<u16>().map_err(|_| invalid_error)
+}
+
+fn parse_server_address(value: &str) -> Result<SocketAddr, ParseError> {
+    value
+        .parse::<SocketAddr>()
+        .map_err(|_| ParseError::InvalidServerAddress)
 }
 
 fn run_command(command: Command) -> i32 {
@@ -101,10 +139,10 @@ fn run_command(command: Command) -> i32 {
             }
         }
         Command::Expose(config) => {
-            match crate::expose::run(config.local_port) {
+            match crate::expose::run(config.local_port, config.server_address) {
                 Ok(()) => 0,
                 Err(error) => {
-                    eprintln!("error: failed to reach local service: {error}");
+                    eprintln!("error: failed to start expose: {error}");
                     1
                 }
             }
@@ -119,5 +157,5 @@ fn print_help() {
     println!("  opentunnel --help");
     println!("  opentunnel --version");
     println!("  opentunnel server --listen <port>");
-    println!("  opentunnel expose --local <port>");
+    println!("  opentunnel expose --local <port> --server <address>");
 }
