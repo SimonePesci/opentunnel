@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::thread;
 use std::time::Duration;
 
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -32,7 +33,15 @@ pub fn run(local_port: u16, server_address: SocketAddr) -> io::Result<()> {
     }
 
     println!("server accepted expose handshake");
+    keep_control_connection(reader)
+}
+
+fn keep_control_connection(_reader: BufReader<TcpStream>) -> io::Result<()> {
+    println!("expose session active; press Ctrl-C to stop");
     println!("tunneling is not implemented yet");
 
-    Ok(())
+    // Holding the reader keeps the TCP control connection open for the server.
+    loop {
+        thread::park();
+    }
 }

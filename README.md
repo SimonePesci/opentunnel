@@ -7,8 +7,9 @@ public tunnel, while keeping the codebase small enough to learn from.
 > Status: early restart. The server command can bind a local TCP listener, and
 > the expose command can check whether a local service and an OpenTunnel server
 > are reachable. Expose sends a small handshake that the server parses and
-> acknowledges. The server handles accepted clients on separate threads.
-> Tunneling behavior is not implemented yet.
+> acknowledges. The expose control connection stays open after registration,
+> and the server handles accepted clients on separate threads. Tunneling
+> behavior is not implemented yet.
 
 ## Goals
 
@@ -49,7 +50,7 @@ The server listens on `127.0.0.1` and runs until stopped with `Ctrl-C`.
 The expose command expects a service to already be listening on the selected
 local port and an OpenTunnel server address such as `127.0.0.1:8080`.
 After connecting, expose sends `EXPOSE <local-port>` to the server and expects
-`OK` back.
+`OK` back. After `OK`, expose keeps the control connection open until stopped.
 
 ## Repository Layout
 

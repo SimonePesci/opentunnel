@@ -39,6 +39,7 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
                 .get_mut()
                 .write_all(crate::protocol::ok_response().as_bytes())?;
             println!("registered expose from {peer_address} for local port {local_port}");
+            wait_for_expose_disconnect(reader, peer_address, local_port)?;
         }
         Err(error) => {
             reader
@@ -52,4 +53,21 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn wait_for_expose_disconnect(
+    mut reader: BufReader<TcpStream>,
+    peer_address: std::net::SocketAddr,
+    local_port: u16,
+) -> io::Result<()> {
+    let mut message = String::new();
+
+    loop {
+        message.clear();
+
+        if reader.read_line(&mut message)? == 0 {
+            println!("expose disconnected from {peer_address} for local port {local_port}");
+            return Ok(());
+        }
+    }
 }
