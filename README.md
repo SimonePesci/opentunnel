@@ -7,7 +7,7 @@ public tunnel, while keeping the codebase small enough to learn from.
 > Status: early restart. The server command can bind a local TCP listener, and
 > the expose command can check whether a local service and an OpenTunnel server
 > are reachable. Expose sends a small handshake that the server parses and
-> acknowledges.
+> acknowledges. The server handles accepted clients on separate threads.
 > Tunneling behavior is not implemented yet.
 
 ## Goals

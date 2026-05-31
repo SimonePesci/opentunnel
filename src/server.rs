@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::thread;
 
 pub fn run(listen_port: u16) -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", listen_port))?;
@@ -9,7 +10,13 @@ pub fn run(listen_port: u16) -> io::Result<()> {
 
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_connection(stream)?;
+
+        // Reading from a client can block, so keep the listener free to accept.
+        thread::spawn(move || {
+            if let Err(error) = handle_connection(stream) {
+                eprintln!("error: connection failed: {error}");
+            }
+        });
     }
 
     Ok(())
