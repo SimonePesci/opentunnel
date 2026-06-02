@@ -1,19 +1,71 @@
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+
+struct ServerState {
+    active_exposes: Mutex<Vec<ExposeRegistration>>,
+}
+
+struct ExposeRegistration {
+    peer_address: SocketAddr,
+    local_port: u16,
+}
+
+impl ServerState {
+    fn new() -> Self {
+        Self {
+            active_exposes: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn register_expose(&self, peer_address: SocketAddr, local_port: u16) -> io::Result<usize> {
+        let mut active_exposes = self.lock_active_exposes()?;
+
+        active_exposes.push(ExposeRegistration {
+            peer_address,
+            local_port,
+        });
+
+        Ok(active_exposes.len())
+    }
+
+    fn unregister_expose(&self, peer_address: SocketAddr, local_port: u16) -> io::Result<usize> {
+        let mut active_exposes = self.lock_active_exposes()?;
+
+        if let Some(index) = active_exposes
+            .iter()
+            .position(|expose| {
+                expose.peer_address == peer_address && expose.local_port == local_port
+            })
+        {
+            active_exposes.swap_remove(index);
+        }
+
+        Ok(active_exposes.len())
+    }
+
+    fn lock_active_exposes(&self) -> io::Result<MutexGuard<'_, Vec<ExposeRegistration>>> {
+        self.active_exposes
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "server state lock poisoned"))
+    }
+}
 
 pub fn run(listen_port: u16) -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", listen_port))?;
+    let state = Arc::new(ServerState::new());
 
     println!("server listening on {}", listener.local_addr()?);
     println!("press Ctrl-C to stop");
 
     for stream in listener.incoming() {
         let stream = stream?;
+        let state = Arc::clone(&state);
 
         // Reading from a client can block, so keep the listener free to accept.
         thread::spawn(move || {
-            if let Err(error) = handle_connection(stream) {
+            if let Err(error) = handle_connection(stream, state) {
                 eprintln!("error: connection failed: {error}");
             }
         });
@@ -22,7 +74,7 @@ pub fn run(listen_port: u16) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_connection(stream: TcpStream) -> io::Result<()> {
+fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<()> {
     let peer_address = stream.peer_addr()?;
     let mut reader = BufReader::new(stream);
     let mut message = String::new();
@@ -38,8 +90,12 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
             reader
                 .get_mut()
                 .write_all(crate::protocol::ok_response().as_bytes())?;
-            println!("registered expose from {peer_address} for local port {local_port}");
-            wait_for_expose_disconnect(reader, peer_address, local_port)?;
+            let active_count = state.register_expose(peer_address, local_port)?;
+
+            println!(
+                "registered expose from {peer_address} for local port {local_port}; active exposes: {active_count}"
+            );
+            wait_for_expose_disconnect(reader, state, peer_address, local_port)?;
         }
         Err(error) => {
             reader
@@ -57,7 +113,8 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
 
 fn wait_for_expose_disconnect(
     mut reader: BufReader<TcpStream>,
-    peer_address: std::net::SocketAddr,
+    state: Arc<ServerState>,
+    peer_address: SocketAddr,
     local_port: u16,
 ) -> io::Result<()> {
     let mut message = String::new();
@@ -66,7 +123,11 @@ fn wait_for_expose_disconnect(
         message.clear();
 
         if reader.read_line(&mut message)? == 0 {
-            println!("expose disconnected from {peer_address} for local port {local_port}");
+            let active_count = state.unregister_expose(peer_address, local_port)?;
+
+            println!(
+                "expose disconnected from {peer_address} for local port {local_port}; active exposes: {active_count}"
+            );
             return Ok(());
         }
     }
