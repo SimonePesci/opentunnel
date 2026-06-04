@@ -12,6 +12,11 @@ struct ExposeRegistration {
     local_port: u16,
 }
 
+enum RegisterExposeError {
+    DuplicateLocalPort,
+    State(io::Error),
+}
+
 impl ServerState {
     fn new() -> Self {
         Self {
@@ -19,8 +24,21 @@ impl ServerState {
         }
     }
 
-    fn register_expose(&self, peer_address: SocketAddr, local_port: u16) -> io::Result<usize> {
-        let mut active_exposes = self.lock_active_exposes()?;
+    fn register_expose(
+        &self,
+        peer_address: SocketAddr,
+        local_port: u16,
+    ) -> Result<usize, RegisterExposeError> {
+        let mut active_exposes = self
+            .lock_active_exposes()
+            .map_err(RegisterExposeError::State)?;
+
+        if active_exposes
+            .iter()
+            .any(|expose| expose.local_port == local_port)
+        {
+            return Err(RegisterExposeError::DuplicateLocalPort);
+        }
 
         active_exposes.push(ExposeRegistration {
             peer_address,
@@ -87,15 +105,28 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
 
     match crate::protocol::parse_handshake(message.trim_end()) {
         Ok(crate::protocol::Handshake::Expose { local_port }) => {
-            reader
-                .get_mut()
-                .write_all(crate::protocol::ok_response().as_bytes())?;
-            let active_count = state.register_expose(peer_address, local_port)?;
+            match state.register_expose(peer_address, local_port) {
+                Ok(active_count) => {
+                    reader
+                        .get_mut()
+                        .write_all(crate::protocol::ok_response().as_bytes())?;
 
-            println!(
-                "registered expose from {peer_address} for local port {local_port}; active exposes: {active_count}"
-            );
-            wait_for_expose_disconnect(reader, state, peer_address, local_port)?;
+                    println!(
+                        "registered expose from {peer_address} for local port {local_port}; active exposes: {active_count}"
+                    );
+                    wait_for_expose_disconnect(reader, state, peer_address, local_port)?;
+                }
+                Err(RegisterExposeError::DuplicateLocalPort) => {
+                    reader
+                        .get_mut()
+                        .write_all(crate::protocol::error_response().as_bytes())?;
+
+                    println!(
+                        "rejected duplicate expose from {peer_address} for local port {local_port}"
+                    );
+                }
+                Err(RegisterExposeError::State(error)) => return Err(error),
+            }
         }
         Err(error) => {
             reader
