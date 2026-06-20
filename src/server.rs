@@ -36,6 +36,10 @@ impl ServerState {
         }
     }
 
+    // Registers a new expose session. Returns DuplicateLocalPort if the same
+    // local port is already active. Binds a tunnel listener to reserve the port
+    // so no other process (or another expose) can steal it while the session is
+    // alive.
     fn register_expose_session(
         &self,
         peer_address: SocketAddr,
@@ -62,6 +66,8 @@ impl ServerState {
         });
 
         let active_count = active_exposes.len();
+        // Drop the lock before returning ExposeSession, which also borrows self.
+        // Rust won't let us return a new borrow of self while the lock is still held.
         drop(active_exposes);
 
         Ok(ExposeSession {
@@ -107,6 +113,10 @@ impl ExposeSession<'_> {
     }
 }
 
+// Safety net: if the caller drops the session without calling close() first
+// (e.g. early return via ?, a panic), the session still unregisters itself.
+// Without this, the server would leak stale expose entries and never free the
+// tunnel port.
 impl Drop for ExposeSession<'_> {
     fn drop(&mut self) {
         if !self.is_registered {
@@ -136,7 +146,8 @@ pub fn run(listen_port: u16) -> io::Result<()> {
         let stream = stream?;
         let state = Arc::clone(&state);
 
-        // Reading from a client can block, so keep the listener free to accept.
+        // Spawn a thread per connection so one blocked read doesn't stall the
+        // accept loop.
         thread::spawn(move || {
             if let Err(error) = handle_connection(stream, state) {
                 eprintln!("error: connection failed: {error}");
@@ -212,6 +223,9 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
     Ok(())
 }
 
+// Blocks until the remote end closes its side of the TCP connection. When the
+// expose client disconnects (Ctrl-C, crash, network drop), read_line returns
+// Ok(0), which signals EOF in TCP.
 fn wait_for_expose_disconnect(reader: &mut BufReader<TcpStream>) -> io::Result<()> {
     let mut message = String::new();
 
