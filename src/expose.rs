@@ -24,13 +24,14 @@ pub fn run(local_port: u16, server_address: SocketAddr) -> io::Result<()> {
     let mut response = String::new();
     reader.read_line(&mut response)?;
 
-    validate_handshake_response(&response)?;
+    let tunnel_address = validate_handshake_response(&response)?;
 
     // The timeout protects only the handshake. Active sessions may otherwise
     // remain idle indefinitely while waiting for incoming tunnel traffic.
     reader.get_mut().set_read_timeout(None)?;
 
     println!("server accepted expose handshake");
+    println!("tunnel available on {tunnel_address}");
     keep_control_connection(reader)
 }
 
@@ -63,9 +64,9 @@ fn monitor_control_connection(mut reader: impl BufRead) -> io::Result<()> {
 }
 
 // Converts the wire response into errors meaningful to the CLI caller.
-fn validate_handshake_response(response: &str) -> io::Result<()> {
+fn validate_handshake_response(response: &str) -> io::Result<SocketAddr> {
     match crate::protocol::parse_handshake_response(response) {
-        Ok(crate::protocol::HandshakeResponse::Ok) => Ok(()),
+        Ok(crate::protocol::HandshakeResponse::Ok { tunnel_address }) => Ok(tunnel_address),
         Ok(crate::protocol::HandshakeResponse::Error(message)) => Err(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             format!("opentunnel server rejected expose: {message}"),
@@ -81,6 +82,20 @@ fn validate_handshake_response(response: &str) -> io::Result<()> {
 mod tests {
     use super::{monitor_control_connection, validate_handshake_response};
     use std::io::{self, Cursor};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn accepted_handshake_returns_tunnel_address() {
+        let tunnel_address = validate_handshake_response("OK 127.0.0.1:3000\n")
+            .expect("successful response should return tunnel address");
+
+        assert_eq!(
+            tunnel_address,
+            "127.0.0.1:3000"
+                .parse::<SocketAddr>()
+                .expect("test address should parse")
+        );
+    }
 
     #[test]
     fn rejected_handshake_returns_server_reason() {

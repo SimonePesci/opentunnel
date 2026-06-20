@@ -18,6 +18,7 @@ struct ExposeSession<'a> {
     state: &'a ServerState,
     peer_address: SocketAddr,
     local_port: u16,
+    tunnel_address: SocketAddr,
     active_count: usize,
     is_registered: bool,
 }
@@ -58,6 +59,9 @@ impl ServerState {
 
         let tunnel_listener = TcpListener::bind(("127.0.0.1", local_port))
             .map_err(RegisterExposeError::TunnelPort)?;
+        let tunnel_address = tunnel_listener
+            .local_addr()
+            .map_err(RegisterExposeError::TunnelPort)?;
 
         active_exposes.push(ExposeRegistration {
             peer_address,
@@ -74,6 +78,7 @@ impl ServerState {
             state: self,
             peer_address,
             local_port,
+            tunnel_address,
             active_count,
             is_registered: true,
         })
@@ -99,6 +104,11 @@ impl ServerState {
 }
 
 impl ExposeSession<'_> {
+    // Returns the actual listener address advertised to the expose client.
+    fn tunnel_address(&self) -> SocketAddr {
+        self.tunnel_address
+    }
+
     fn active_count(&self) -> usize {
         self.active_count
     }
@@ -173,9 +183,9 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
         Ok(crate::protocol::Handshake::Expose { local_port }) => {
             match state.register_expose_session(peer_address, local_port) {
                 Ok(session) => {
-                    reader
-                        .get_mut()
-                        .write_all(crate::protocol::ok_response().as_bytes())?;
+                    reader.get_mut().write_all(
+                        crate::protocol::ok_response(session.tunnel_address()).as_bytes(),
+                    )?;
 
                     println!(
                         "registered expose from {peer_address} for local port {local_port}; active exposes: {}",
@@ -272,6 +282,21 @@ mod tests {
             .expect_err("active expose should reserve its tunnel port");
 
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn expose_session_reports_bound_tunnel_address() {
+        let state = ServerState::new();
+        let local_port = available_port();
+
+        let session = state
+            .register_expose_session(peer_address(41000), local_port)
+            .expect("expose should register");
+
+        assert_eq!(
+            session.tunnel_address(),
+            SocketAddr::from(([127, 0, 0, 1], local_port))
+        );
     }
 
     #[test]

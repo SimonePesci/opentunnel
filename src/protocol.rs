@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 pub enum Handshake {
     Expose { local_port: u16 },
 }
@@ -12,13 +14,15 @@ pub enum HandshakeParseError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HandshakeResponse<'a> {
-    Ok,
+    Ok { tunnel_address: SocketAddr },
     Error(&'a str),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HandshakeResponseParseError {
     Empty,
+    InvalidTunnelAddress,
+    MissingTunnelAddress,
     MissingErrorMessage,
     UnknownStatus,
 }
@@ -27,8 +31,10 @@ pub fn expose_handshake(local_port: u16) -> String {
     format!("EXPOSE {local_port}\n")
 }
 
-pub fn ok_response() -> &'static str {
-    "OK\n"
+// Includes the bound endpoint so the expose client can show where the tunnel
+// is reachable instead of reconstructing server-side binding details.
+pub fn ok_response(tunnel_address: SocketAddr) -> String {
+    format!("OK {tunnel_address}\n")
 }
 
 // Formats a single-line rejection so the expose client can report why the
@@ -43,8 +49,12 @@ pub fn parse_handshake_response(
 ) -> Result<HandshakeResponse<'_>, HandshakeResponseParseError> {
     let line = line.trim_end();
 
-    if line == "OK" {
-        return Ok(HandshakeResponse::Ok);
+    if let Some(address) = line.strip_prefix("OK ") {
+        let tunnel_address = address
+            .parse::<SocketAddr>()
+            .map_err(|_| HandshakeResponseParseError::InvalidTunnelAddress)?;
+
+        return Ok(HandshakeResponse::Ok { tunnel_address });
     }
 
     if let Some(message) = line.strip_prefix("ERR ") {
@@ -57,6 +67,7 @@ pub fn parse_handshake_response(
 
     match line {
         "" => Err(HandshakeResponseParseError::Empty),
+        "OK" => Err(HandshakeResponseParseError::MissingTunnelAddress),
         "ERR" => Err(HandshakeResponseParseError::MissingErrorMessage),
         _ => Err(HandshakeResponseParseError::UnknownStatus),
     }
@@ -93,10 +104,34 @@ pub fn describe_parse_error(error: HandshakeParseError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{parse_handshake_response, HandshakeResponse, HandshakeResponseParseError};
+    use std::net::SocketAddr;
 
     #[test]
     fn parses_successful_handshake_response() {
-        assert_eq!(parse_handshake_response("OK\n"), Ok(HandshakeResponse::Ok));
+        assert_eq!(
+            parse_handshake_response("OK 127.0.0.1:3000\n"),
+            Ok(HandshakeResponse::Ok {
+                tunnel_address: "127.0.0.1:3000"
+                    .parse::<SocketAddr>()
+                    .expect("test address should parse"),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_success_response_without_tunnel_address() {
+        assert_eq!(
+            parse_handshake_response("OK\n"),
+            Err(HandshakeResponseParseError::MissingTunnelAddress)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_tunnel_address() {
+        assert_eq!(
+            parse_handshake_response("OK invalid\n"),
+            Err(HandshakeResponseParseError::InvalidTunnelAddress)
+        );
     }
 
     #[test]

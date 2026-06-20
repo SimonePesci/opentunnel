@@ -52,13 +52,14 @@ The server listens on `127.0.0.1` and runs until stopped with `Ctrl-C`.
 The expose command expects a service to already be listening on the selected
 local port and an OpenTunnel server address such as `127.0.0.1:8080`.
 After connecting, expose sends `EXPOSE <local-port>` to the server and expects
-`OK` back. Rejected handshakes return `ERR <reason>` so the expose command can
-report why registration failed. After `OK`, expose keeps the control connection
-open until stopped. The server registers active expose sessions and removes them
-when they disconnect. An accepted session reserves the matching port on the
-server until the expose disconnects. The expose command also exits with an error
-if the server closes the control connection, but tunnel connections are not
-forwarded yet.
+`OK <tunnel-address>` back. The expose command prints this address so users know
+where the tunnel is reachable. Rejected handshakes return `ERR <reason>` so the
+expose command can report why registration failed. After `OK`, expose keeps the
+control connection open until stopped. The server registers active expose
+sessions and removes them when they disconnect. An accepted session reserves the
+matching port on the server until the expose disconnects. The expose command
+also exits with an error if the server closes the control connection, but tunnel
+connections are not forwarded yet.
 
 ## Architecture
 
@@ -90,7 +91,7 @@ sequenceDiagram
     E->>S: EXPOSE <port>\n
     S->>S: Register session
     S->>S: Bind tunnel port
-    S->>E: OK\n
+    S->>E: OK <tunnel-address>\n
     Note over E,S: Control connection held open
     E--xS: disconnect
     S->>S: Unregister session
