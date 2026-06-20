@@ -9,9 +9,9 @@ public tunnel, while keeping the codebase small enough to learn from.
 > are reachable. Expose sends a small handshake that the server parses and
 > acknowledges. The expose control connection stays open after registration,
 > and the server tracks active expose sessions across connection threads. The
-> server rejects a second expose for the same local port while one is already
-> active and allocates an available server-side port for incoming tunnel
-> connections. Traffic forwarding is not implemented yet.
+> server allocates an independent server-side port for each incoming tunnel.
+> Multiple clients can expose services that use the same local port. Traffic
+> forwarding is not implemented yet.
 
 ## Goals
 
@@ -58,8 +58,10 @@ expose command can report why registration failed. After `OK`, expose keeps the
 control connection open until stopped. The server registers active expose
 sessions and removes them when they disconnect. An accepted session reserves the
 dynamically allocated tunnel port on the server until the expose disconnects.
-The expose command also exits with an error if the server closes the control
-connection, but tunnel connections are not forwarded yet.
+Because tunnel ports are allocated independently, different clients may expose
+the same local service port without conflicting. The expose command also exits
+with an error if the server closes the control connection, but tunnel
+connections are not forwarded yet.
 
 ## Architecture
 

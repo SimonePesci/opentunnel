@@ -25,7 +25,6 @@ struct ExposeSession<'a> {
 
 #[derive(Debug)]
 enum RegisterExposeError {
-    DuplicateLocalPort,
     State(io::Error),
     TunnelPort(io::Error),
 }
@@ -49,13 +48,8 @@ impl ServerState {
             .lock_active_exposes()
             .map_err(RegisterExposeError::State)?;
 
-        if active_exposes
-            .iter()
-            .any(|expose| expose.local_port == local_port)
-        {
-            return Err(RegisterExposeError::DuplicateLocalPort);
-        }
-
+        // Port zero delegates uniqueness to the OS, which owns the server-side
+        // port namespace and can allocate safely across concurrent sessions.
         let tunnel_listener =
             TcpListener::bind(("127.0.0.1", 0)).map_err(RegisterExposeError::TunnelPort)?;
         let tunnel_address = tunnel_listener
@@ -197,22 +191,13 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
                         "expose disconnected from {peer_address} for local port {local_port}; active exposes: {active_count}"
                     );
                 }
-                Err(RegisterExposeError::DuplicateLocalPort) => {
-                    reader.get_mut().write_all(
-                        crate::protocol::error_response("local port already exposed").as_bytes(),
-                    )?;
-
-                    println!(
-                        "rejected duplicate expose from {peer_address} for local port {local_port}"
-                    );
-                }
                 Err(RegisterExposeError::TunnelPort(error)) => {
                     reader.get_mut().write_all(
                         crate::protocol::error_response("tunnel port unavailable").as_bytes(),
                     )?;
 
                     println!(
-                        "rejected expose from {peer_address}; tunnel port {local_port} is unavailable: {error}"
+                        "rejected expose from {peer_address} for local port {local_port}; failed to allocate tunnel port: {error}"
                     );
                 }
                 Err(RegisterExposeError::State(error)) => return Err(error),
@@ -247,25 +232,28 @@ fn wait_for_expose_disconnect(reader: &mut BufReader<TcpStream>) -> io::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{RegisterExposeError, ServerState};
+    use super::ServerState;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
 
     #[test]
-    fn active_expose_session_rejects_duplicate_local_port() {
+    fn separate_clients_can_expose_the_same_local_port() {
         let state = ServerState::new();
         let first_peer = peer_address(41000);
         let second_peer = peer_address(41001);
         let local_port = available_port();
 
-        let _session = state
+        let first_session = state
             .register_expose_session(first_peer, local_port)
             .expect("first expose should register");
+        let second_session = state
+            .register_expose_session(second_peer, local_port)
+            .expect("second expose should register");
 
-        assert!(matches!(
-            state.register_expose_session(second_peer, local_port),
-            Err(RegisterExposeError::DuplicateLocalPort)
-        ));
+        assert_ne!(
+            first_session.tunnel_address(),
+            second_session.tunnel_address()
+        );
     }
 
     #[test]
