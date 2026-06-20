@@ -10,6 +10,8 @@ struct ServerState {
 struct ExposeRegistration {
     peer_address: SocketAddr,
     local_port: u16,
+    // Retaining the listener reserves the tunnel port until the session ends.
+    _tunnel_listener: TcpListener,
 }
 
 struct ExposeSession<'a> {
@@ -24,6 +26,7 @@ struct ExposeSession<'a> {
 enum RegisterExposeError {
     DuplicateLocalPort,
     State(io::Error),
+    TunnelPort(io::Error),
 }
 
 impl ServerState {
@@ -49,9 +52,13 @@ impl ServerState {
             return Err(RegisterExposeError::DuplicateLocalPort);
         }
 
+        let tunnel_listener = TcpListener::bind(("127.0.0.1", local_port))
+            .map_err(RegisterExposeError::TunnelPort)?;
+
         active_exposes.push(ExposeRegistration {
             peer_address,
             local_port,
+            _tunnel_listener: tunnel_listener,
         });
 
         let active_count = active_exposes.len();
@@ -69,12 +76,9 @@ impl ServerState {
     fn unregister_expose(&self, peer_address: SocketAddr, local_port: u16) -> io::Result<usize> {
         let mut active_exposes = self.lock_active_exposes()?;
 
-        if let Some(index) = active_exposes
-            .iter()
-            .position(|expose| {
-                expose.peer_address == peer_address && expose.local_port == local_port
-            })
-        {
+        if let Some(index) = active_exposes.iter().position(|expose| {
+            expose.peer_address == peer_address && expose.local_port == local_port
+        }) {
             active_exposes.swap_remove(index);
         }
 
@@ -84,7 +88,7 @@ impl ServerState {
     fn lock_active_exposes(&self) -> io::Result<MutexGuard<'_, Vec<ExposeRegistration>>> {
         self.active_exposes
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "server state lock poisoned"))
+            .map_err(|_| io::Error::other("server state lock poisoned"))
     }
 }
 
@@ -182,6 +186,15 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
                         "rejected duplicate expose from {peer_address} for local port {local_port}"
                     );
                 }
+                Err(RegisterExposeError::TunnelPort(error)) => {
+                    reader
+                        .get_mut()
+                        .write_all(crate::protocol::error_response().as_bytes())?;
+
+                    println!(
+                        "rejected expose from {peer_address}; tunnel port {local_port} is unavailable: {error}"
+                    );
+                }
                 Err(RegisterExposeError::State(error)) => return Err(error),
             }
         }
@@ -214,41 +227,85 @@ fn wait_for_expose_disconnect(reader: &mut BufReader<TcpStream>) -> io::Result<(
 #[cfg(test)]
 mod tests {
     use super::{RegisterExposeError, ServerState};
-    use std::net::SocketAddr;
+    use std::io;
+    use std::net::{SocketAddr, TcpListener};
 
     #[test]
     fn active_expose_session_rejects_duplicate_local_port() {
         let state = ServerState::new();
         let first_peer = peer_address(41000);
         let second_peer = peer_address(41001);
+        let local_port = available_port();
 
         let _session = state
-            .register_expose_session(first_peer, 3000)
+            .register_expose_session(first_peer, local_port)
             .expect("first expose should register");
 
         assert!(matches!(
-            state.register_expose_session(second_peer, 3000),
+            state.register_expose_session(second_peer, local_port),
             Err(RegisterExposeError::DuplicateLocalPort)
         ));
     }
 
     #[test]
-    fn dropped_expose_session_releases_local_port() {
+    fn active_expose_session_reserves_tunnel_port() {
+        let state = ServerState::new();
+        let local_port = available_port();
+
+        let _session = state
+            .register_expose_session(peer_address(41000), local_port)
+            .expect("expose should register");
+
+        let error = TcpListener::bind(("127.0.0.1", local_port))
+            .expect_err("active expose should reserve its tunnel port");
+
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn occupied_tunnel_port_rejects_expose() {
+        let state = ServerState::new();
+        let occupied_listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let occupied_port = occupied_listener
+            .local_addr()
+            .expect("test listener should have an address")
+            .port();
+
+        assert!(matches!(
+            state.register_expose_session(peer_address(41000), occupied_port),
+            Err(RegisterExposeError::TunnelPort(error))
+                if error.kind() == io::ErrorKind::AddrInUse
+        ));
+    }
+
+    #[test]
+    fn dropped_expose_session_releases_tunnel_port() {
         let state = ServerState::new();
         let first_peer = peer_address(41000);
         let second_peer = peer_address(41001);
+        let local_port = available_port();
 
         let session = state
-            .register_expose_session(first_peer, 3000)
+            .register_expose_session(first_peer, local_port)
             .expect("first expose should register");
         drop(session);
 
         assert!(state
-            .register_expose_session(second_peer, 3000)
+            .register_expose_session(second_peer, local_port)
             .is_ok());
     }
 
     fn peer_address(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn available_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+
+        listener
+            .local_addr()
+            .expect("test listener should have an address")
+            .port()
     }
 }
