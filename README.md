@@ -56,7 +56,8 @@ After connecting, expose sends `EXPOSE <local-port>` to the server and expects
 The server registers active expose sessions and removes them when they
 disconnect. If the same local port is already active, the server returns `ERR`.
 An accepted session reserves the matching port on the server until the expose
-disconnects, but connections are not forwarded yet.
+disconnects. The expose command also exits with an error if the server closes
+the control connection, but tunnel connections are not forwarded yet.
 
 ## Architecture
 

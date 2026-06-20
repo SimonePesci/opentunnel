@@ -1,6 +1,5 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::thread;
 use std::time::Duration;
 
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -36,12 +35,49 @@ pub fn run(local_port: u16, server_address: SocketAddr) -> io::Result<()> {
     keep_control_connection(reader)
 }
 
-fn keep_control_connection(_reader: BufReader<TcpStream>) -> io::Result<()> {
+fn keep_control_connection(reader: BufReader<TcpStream>) -> io::Result<()> {
     println!("expose session active; press Ctrl-C to stop");
     println!("tunneling is not implemented yet");
 
-    // Holding the reader keeps the TCP control connection open for the server.
-    loop {
-        thread::park();
+    monitor_control_connection(reader)
+}
+
+fn monitor_control_connection(mut reader: impl BufRead) -> io::Result<()> {
+    let mut message = String::new();
+
+    // This read blocks while the session is healthy because the current
+    // protocol does not define any messages after the initial OK response.
+    if reader.read_line(&mut message)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "opentunnel server closed the control connection",
+        ));
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("unexpected server control message: {}", message.trim_end()),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::monitor_control_connection;
+    use std::io::{self, Cursor};
+
+    #[test]
+    fn closed_control_connection_returns_connection_error() {
+        let error = monitor_control_connection(Cursor::new(Vec::<u8>::new()))
+            .expect_err("closed control connection should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    #[test]
+    fn unexpected_control_message_is_rejected() {
+        let error = monitor_control_connection(Cursor::new(b"UNKNOWN\n"))
+            .expect_err("unexpected control message should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }
