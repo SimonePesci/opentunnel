@@ -189,18 +189,18 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
                     );
                 }
                 Err(RegisterExposeError::DuplicateLocalPort) => {
-                    reader
-                        .get_mut()
-                        .write_all(crate::protocol::error_response().as_bytes())?;
+                    reader.get_mut().write_all(
+                        crate::protocol::error_response("local port already exposed").as_bytes(),
+                    )?;
 
                     println!(
                         "rejected duplicate expose from {peer_address} for local port {local_port}"
                     );
                 }
                 Err(RegisterExposeError::TunnelPort(error)) => {
-                    reader
-                        .get_mut()
-                        .write_all(crate::protocol::error_response().as_bytes())?;
+                    reader.get_mut().write_all(
+                        crate::protocol::error_response("tunnel port unavailable").as_bytes(),
+                    )?;
 
                     println!(
                         "rejected expose from {peer_address}; tunnel port {local_port} is unavailable: {error}"
@@ -210,13 +210,11 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
             }
         }
         Err(error) => {
+            let error_message = crate::protocol::describe_parse_error(error);
             reader
                 .get_mut()
-                .write_all(crate::protocol::error_response().as_bytes())?;
-            println!(
-                "invalid handshake from {peer_address}: {}",
-                crate::protocol::describe_parse_error(error)
-            );
+                .write_all(crate::protocol::error_response(error_message).as_bytes())?;
+            println!("invalid handshake from {peer_address}: {error_message}");
         }
     }
 

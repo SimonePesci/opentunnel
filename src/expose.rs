@@ -24,17 +24,17 @@ pub fn run(local_port: u16, server_address: SocketAddr) -> io::Result<()> {
     let mut response = String::new();
     reader.read_line(&mut response)?;
 
-    if !crate::protocol::is_ok_response(&response) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unexpected server response: {}", response.trim_end()),
-        ));
-    }
+    validate_handshake_response(&response)?;
+
+    // The timeout protects only the handshake. Active sessions may otherwise
+    // remain idle indefinitely while waiting for incoming tunnel traffic.
+    reader.get_mut().set_read_timeout(None)?;
 
     println!("server accepted expose handshake");
     keep_control_connection(reader)
 }
 
+// Keeps the expose process tied to the lifetime of the server-side session.
 fn keep_control_connection(reader: BufReader<TcpStream>) -> io::Result<()> {
     println!("expose session active; press Ctrl-C to stop");
     println!("tunneling is not implemented yet");
@@ -42,6 +42,8 @@ fn keep_control_connection(reader: BufReader<TcpStream>) -> io::Result<()> {
     monitor_control_connection(reader)
 }
 
+// Waits for the first post-handshake control event. The current protocol
+// defines no such messages, so either EOF or data means the session is invalid.
 fn monitor_control_connection(mut reader: impl BufRead) -> io::Result<()> {
     let mut message = String::new();
 
@@ -60,10 +62,42 @@ fn monitor_control_connection(mut reader: impl BufRead) -> io::Result<()> {
     ))
 }
 
+// Converts the wire response into errors meaningful to the CLI caller.
+fn validate_handshake_response(response: &str) -> io::Result<()> {
+    match crate::protocol::parse_handshake_response(response) {
+        Ok(crate::protocol::HandshakeResponse::Ok) => Ok(()),
+        Ok(crate::protocol::HandshakeResponse::Error(message)) => Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("opentunnel server rejected expose: {message}"),
+        )),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid server handshake response: {}", response.trim_end()),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::monitor_control_connection;
+    use super::{monitor_control_connection, validate_handshake_response};
     use std::io::{self, Cursor};
+
+    #[test]
+    fn rejected_handshake_returns_server_reason() {
+        let error = validate_handshake_response("ERR tunnel port unavailable\n")
+            .expect_err("server rejection should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(error.to_string().contains("tunnel port unavailable"));
+    }
+
+    #[test]
+    fn malformed_handshake_response_is_rejected() {
+        let error =
+            validate_handshake_response("WAIT\n").expect_err("malformed response should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn closed_control_connection_returns_connection_error() {
