@@ -37,10 +37,9 @@ impl ServerState {
         }
     }
 
-    // Registers a new expose session. Returns DuplicateLocalPort if the same
-    // local port is already active. Binds a tunnel listener to reserve the port
-    // so no other process (or another expose) can steal it while the session is
-    // alive.
+    // Registers a new expose session and allocates an available server-side
+    // tunnel port. The client's local port identifies its target service; it
+    // must not constrain which port is available on the server.
     fn register_expose_session(
         &self,
         peer_address: SocketAddr,
@@ -57,8 +56,8 @@ impl ServerState {
             return Err(RegisterExposeError::DuplicateLocalPort);
         }
 
-        let tunnel_listener = TcpListener::bind(("127.0.0.1", local_port))
-            .map_err(RegisterExposeError::TunnelPort)?;
+        let tunnel_listener =
+            TcpListener::bind(("127.0.0.1", 0)).map_err(RegisterExposeError::TunnelPort)?;
         let tunnel_address = tunnel_listener
             .local_addr()
             .map_err(RegisterExposeError::TunnelPort)?;
@@ -274,11 +273,11 @@ mod tests {
         let state = ServerState::new();
         let local_port = available_port();
 
-        let _session = state
+        let session = state
             .register_expose_session(peer_address(41000), local_port)
             .expect("expose should register");
 
-        let error = TcpListener::bind(("127.0.0.1", local_port))
+        let error = TcpListener::bind(session.tunnel_address())
             .expect_err("active expose should reserve its tunnel port");
 
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
@@ -293,14 +292,12 @@ mod tests {
             .register_expose_session(peer_address(41000), local_port)
             .expect("expose should register");
 
-        assert_eq!(
-            session.tunnel_address(),
-            SocketAddr::from(([127, 0, 0, 1], local_port))
-        );
+        assert_eq!(session.tunnel_address().ip(), peer_address(0).ip());
+        assert_ne!(session.tunnel_address().port(), 0);
     }
 
     #[test]
-    fn occupied_tunnel_port_rejects_expose() {
+    fn occupied_local_port_does_not_block_tunnel_allocation() {
         let state = ServerState::new();
         let occupied_listener =
             TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
@@ -309,28 +306,25 @@ mod tests {
             .expect("test listener should have an address")
             .port();
 
-        assert!(matches!(
-            state.register_expose_session(peer_address(41000), occupied_port),
-            Err(RegisterExposeError::TunnelPort(error))
-                if error.kind() == io::ErrorKind::AddrInUse
-        ));
+        let session = state
+            .register_expose_session(peer_address(41000), occupied_port)
+            .expect("server should allocate a separate tunnel port");
+
+        assert_ne!(session.tunnel_address().port(), occupied_port);
     }
 
     #[test]
     fn dropped_expose_session_releases_tunnel_port() {
         let state = ServerState::new();
-        let first_peer = peer_address(41000);
-        let second_peer = peer_address(41001);
         let local_port = available_port();
 
         let session = state
-            .register_expose_session(first_peer, local_port)
+            .register_expose_session(peer_address(41000), local_port)
             .expect("first expose should register");
+        let tunnel_address = session.tunnel_address();
         drop(session);
 
-        assert!(state
-            .register_expose_session(second_peer, local_port)
-            .is_ok());
+        assert!(TcpListener::bind(tunnel_address).is_ok());
     }
 
     fn peer_address(port: u16) -> SocketAddr {

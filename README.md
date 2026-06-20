@@ -10,8 +10,8 @@ public tunnel, while keeping the codebase small enough to learn from.
 > acknowledges. The expose control connection stays open after registration,
 > and the server tracks active expose sessions across connection threads. The
 > server rejects a second expose for the same local port while one is already
-> active and reserves that port for incoming tunnel connections. Traffic
-> forwarding is not implemented yet.
+> active and allocates an available server-side port for incoming tunnel
+> connections. Traffic forwarding is not implemented yet.
 
 ## Goals
 
@@ -57,9 +57,9 @@ where the tunnel is reachable. Rejected handshakes return `ERR <reason>` so the
 expose command can report why registration failed. After `OK`, expose keeps the
 control connection open until stopped. The server registers active expose
 sessions and removes them when they disconnect. An accepted session reserves the
-matching port on the server until the expose disconnects. The expose command
-also exits with an error if the server closes the control connection, but tunnel
-connections are not forwarded yet.
+dynamically allocated tunnel port on the server until the expose disconnects.
+The expose command also exits with an error if the server closes the control
+connection, but tunnel connections are not forwarded yet.
 
 ## Architecture
 
@@ -90,7 +90,7 @@ sequenceDiagram
     E->>S: TCP connect
     E->>S: EXPOSE <port>\n
     S->>S: Register session
-    S->>S: Bind tunnel port
+    S->>S: Allocate available tunnel port
     S->>E: OK <tunnel-address>\n
     Note over E,S: Control connection held open
     E--xS: disconnect
