@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
@@ -8,17 +9,18 @@ const CONTROL_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 struct ServerState {
     active_exposes: Mutex<Vec<ExposeRegistration>>,
+    next_session_id: AtomicU64,
 }
 
 struct ExposeRegistration {
-    peer_address: SocketAddr,
-    local_port: u16,
+    session_id: u64,
 }
 
 struct ExposeSession<'a> {
     state: &'a ServerState,
     peer_address: SocketAddr,
     local_port: u16,
+    session_id: u64,
     // Session ownership keeps the endpoint reserved and closes it on drop.
     tunnel_listener: TcpListener,
     tunnel_address: SocketAddr,
@@ -28,6 +30,7 @@ struct ExposeSession<'a> {
 
 #[derive(Debug)]
 enum RegisterExposeError {
+    SessionIdsExhausted,
     State(io::Error),
     TunnelPort(io::Error),
 }
@@ -36,6 +39,7 @@ impl ServerState {
     fn new() -> Self {
         Self {
             active_exposes: Mutex::new(Vec::new()),
+            next_session_id: AtomicU64::new(1),
         }
     }
 
@@ -61,11 +65,14 @@ impl ServerState {
         let tunnel_address = tunnel_listener
             .local_addr()
             .map_err(RegisterExposeError::TunnelPort)?;
+        let session_id = self
+            .next_session_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| RegisterExposeError::SessionIdsExhausted)?;
 
-        active_exposes.push(ExposeRegistration {
-            peer_address,
-            local_port,
-        });
+        active_exposes.push(ExposeRegistration { session_id });
 
         let active_count = active_exposes.len();
         // Drop the lock before returning ExposeSession, which also borrows self.
@@ -76,6 +83,7 @@ impl ServerState {
             state: self,
             peer_address,
             local_port,
+            session_id,
             tunnel_listener,
             tunnel_address,
             active_count,
@@ -83,12 +91,13 @@ impl ServerState {
         })
     }
 
-    fn unregister_expose(&self, peer_address: SocketAddr, local_port: u16) -> io::Result<usize> {
+    fn unregister_expose(&self, session_id: u64) -> io::Result<usize> {
         let mut active_exposes = self.lock_active_exposes()?;
 
-        if let Some(index) = active_exposes.iter().position(|expose| {
-            expose.peer_address == peer_address && expose.local_port == local_port
-        }) {
+        if let Some(index) = active_exposes
+            .iter()
+            .position(|expose| expose.session_id == session_id)
+        {
             active_exposes.swap_remove(index);
         }
 
@@ -108,6 +117,11 @@ impl ExposeSession<'_> {
         self.tunnel_address
     }
 
+    // Identifies this expose session when future data connections arrive.
+    fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
     // Checks for an incoming tunnel user without blocking control-session
     // monitoring on the same connection thread.
     fn try_accept_tunnel_connection(&self) -> io::Result<Option<(TcpStream, SocketAddr)>> {
@@ -123,9 +137,7 @@ impl ExposeSession<'_> {
     }
 
     fn close(mut self) -> io::Result<usize> {
-        let active_count = self
-            .state
-            .unregister_expose(self.peer_address, self.local_port)?;
+        let active_count = self.state.unregister_expose(self.session_id)?;
         self.is_registered = false;
 
         Ok(active_count)
@@ -142,10 +154,7 @@ impl Drop for ExposeSession<'_> {
             return;
         }
 
-        if let Err(error) = self
-            .state
-            .unregister_expose(self.peer_address, self.local_port)
-        {
+        if let Err(error) = self.state.unregister_expose(self.session_id) {
             eprintln!(
                 "error: failed to unregister expose from {} for local port {}: {error}",
                 self.peer_address, self.local_port
@@ -193,7 +202,11 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
             match state.register_expose_session(peer_address, local_port) {
                 Ok(session) => {
                     reader.get_mut().write_all(
-                        crate::protocol::ok_response(session.tunnel_address()).as_bytes(),
+                        crate::protocol::ok_response(
+                            session.tunnel_address(),
+                            session.session_id(),
+                        )
+                        .as_bytes(),
                     )?;
 
                     println!(
@@ -218,6 +231,12 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
                     println!(
                         "rejected expose from {peer_address} for local port {local_port}; failed to allocate tunnel port: {error}"
                     );
+                }
+                Err(RegisterExposeError::SessionIdsExhausted) => {
+                    reader.get_mut().write_all(
+                        crate::protocol::error_response("session IDs exhausted").as_bytes(),
+                    )?;
+                    println!("rejected expose from {peer_address}; session IDs exhausted");
                 }
                 Err(RegisterExposeError::State(error)) => return Err(error),
             }
@@ -300,6 +319,7 @@ mod tests {
             first_session.tunnel_address(),
             second_session.tunnel_address()
         );
+        assert_ne!(first_session.session_id(), second_session.session_id());
     }
 
     #[test]

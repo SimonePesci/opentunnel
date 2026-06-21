@@ -14,14 +14,20 @@ pub enum HandshakeParseError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HandshakeResponse<'a> {
-    Ok { tunnel_address: SocketAddr },
+    Ok {
+        tunnel_address: SocketAddr,
+        session_id: u64,
+    },
     Error(&'a str),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HandshakeResponseParseError {
     Empty,
+    ExtraSuccessParts,
     InvalidTunnelAddress,
+    InvalidSessionId,
+    MissingSessionId,
     MissingTunnelAddress,
     MissingErrorMessage,
     UnknownStatus,
@@ -44,8 +50,8 @@ pub fn expose_handshake(local_port: u16) -> String {
 
 // Includes the bound endpoint so the expose client can show where the tunnel
 // is reachable instead of reconstructing server-side binding details.
-pub fn ok_response(tunnel_address: SocketAddr) -> String {
-    format!("OK {tunnel_address}\n")
+pub fn ok_response(tunnel_address: SocketAddr, session_id: u64) -> String {
+    format!("OK {tunnel_address} {session_id}\n")
 }
 
 // Formats a single-line rejection so the expose client can report why the
@@ -74,12 +80,30 @@ pub fn parse_handshake_response(
 ) -> Result<HandshakeResponse<'_>, HandshakeResponseParseError> {
     let line = line.trim_end();
 
-    if let Some(address) = line.strip_prefix("OK ") {
+    if let Some(success) = line.strip_prefix("OK ") {
+        let mut parts = success.split_whitespace();
+        let address = parts
+            .next()
+            .ok_or(HandshakeResponseParseError::MissingTunnelAddress)?;
+        let session_id = parts
+            .next()
+            .ok_or(HandshakeResponseParseError::MissingSessionId)?;
+
+        if parts.next().is_some() {
+            return Err(HandshakeResponseParseError::ExtraSuccessParts);
+        }
+
         let tunnel_address = address
             .parse::<SocketAddr>()
             .map_err(|_| HandshakeResponseParseError::InvalidTunnelAddress)?;
+        let session_id = session_id
+            .parse::<u64>()
+            .map_err(|_| HandshakeResponseParseError::InvalidSessionId)?;
 
-        return Ok(HandshakeResponse::Ok { tunnel_address });
+        return Ok(HandshakeResponse::Ok {
+            tunnel_address,
+            session_id,
+        });
     }
 
     if let Some(message) = line.strip_prefix("ERR ") {
@@ -136,12 +160,19 @@ mod tests {
 
     #[test]
     fn parses_successful_handshake_response() {
+        let tunnel_address = "127.0.0.1:3000"
+            .parse::<SocketAddr>()
+            .expect("test address should parse");
+
         assert_eq!(
-            parse_handshake_response("OK 127.0.0.1:3000\n"),
+            super::ok_response(tunnel_address, 42),
+            "OK 127.0.0.1:3000 42\n"
+        );
+        assert_eq!(
+            parse_handshake_response("OK 127.0.0.1:3000 42\n"),
             Ok(HandshakeResponse::Ok {
-                tunnel_address: "127.0.0.1:3000"
-                    .parse::<SocketAddr>()
-                    .expect("test address should parse"),
+                tunnel_address,
+                session_id: 42,
             })
         );
     }
@@ -157,8 +188,32 @@ mod tests {
     #[test]
     fn rejects_invalid_tunnel_address() {
         assert_eq!(
-            parse_handshake_response("OK invalid\n"),
+            parse_handshake_response("OK invalid 42\n"),
             Err(HandshakeResponseParseError::InvalidTunnelAddress)
+        );
+    }
+
+    #[test]
+    fn rejects_success_response_without_session_id() {
+        assert_eq!(
+            parse_handshake_response("OK 127.0.0.1:3000\n"),
+            Err(HandshakeResponseParseError::MissingSessionId)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_session_id() {
+        assert_eq!(
+            parse_handshake_response("OK 127.0.0.1:3000 invalid\n"),
+            Err(HandshakeResponseParseError::InvalidSessionId)
+        );
+    }
+
+    #[test]
+    fn rejects_extra_success_response_parts() {
+        assert_eq!(
+            parse_handshake_response("OK 127.0.0.1:3000 42 extra\n"),
+            Err(HandshakeResponseParseError::ExtraSuccessParts)
         );
     }
 

@@ -24,13 +24,14 @@ pub fn run(local_port: u16, server_address: SocketAddr) -> io::Result<()> {
     let mut response = String::new();
     reader.read_line(&mut response)?;
 
-    let tunnel_address = validate_handshake_response(&response)?;
+    let (tunnel_address, session_id) = validate_handshake_response(&response)?;
 
     // The timeout protects only the handshake. Active sessions may otherwise
     // remain idle indefinitely while waiting for incoming tunnel traffic.
     reader.get_mut().set_read_timeout(None)?;
 
     println!("server accepted expose handshake");
+    println!("registered expose session {session_id}");
     println!("tunnel available on {tunnel_address}");
     keep_control_connection(reader)
 }
@@ -72,9 +73,12 @@ fn monitor_control_connection(mut reader: impl BufRead) -> io::Result<()> {
 }
 
 // Converts the wire response into errors meaningful to the CLI caller.
-fn validate_handshake_response(response: &str) -> io::Result<SocketAddr> {
+fn validate_handshake_response(response: &str) -> io::Result<(SocketAddr, u64)> {
     match crate::protocol::parse_handshake_response(response) {
-        Ok(crate::protocol::HandshakeResponse::Ok { tunnel_address }) => Ok(tunnel_address),
+        Ok(crate::protocol::HandshakeResponse::Ok {
+            tunnel_address,
+            session_id,
+        }) => Ok((tunnel_address, session_id)),
         Ok(crate::protocol::HandshakeResponse::Error(message)) => Err(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             format!("opentunnel server rejected expose: {message}"),
@@ -94,7 +98,7 @@ mod tests {
 
     #[test]
     fn accepted_handshake_returns_tunnel_address() {
-        let tunnel_address = validate_handshake_response("OK 127.0.0.1:3000\n")
+        let (tunnel_address, session_id) = validate_handshake_response("OK 127.0.0.1:3000 42\n")
             .expect("successful response should return tunnel address");
 
         assert_eq!(
@@ -103,6 +107,7 @@ mod tests {
                 .parse::<SocketAddr>()
                 .expect("test address should parse")
         );
+        assert_eq!(session_id, 42);
     }
 
     #[test]

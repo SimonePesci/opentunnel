@@ -53,12 +53,13 @@ The server listens on `127.0.0.1` and runs until stopped with `Ctrl-C`.
 The expose command expects a service to already be listening on the selected
 local port and an OpenTunnel server address such as `127.0.0.1:8080`.
 After connecting, expose sends `EXPOSE <local-port>` to the server and expects
-`OK <tunnel-address>` back. The expose command prints this address so users know
-where the tunnel is reachable. Rejected handshakes return `ERR <reason>` so the
-expose command can report why registration failed. After `OK`, expose keeps the
-control connection open until stopped. The server registers active expose
-sessions and removes them when they disconnect. An accepted session reserves the
-dynamically allocated tunnel port on the server until the expose disconnects.
+`OK <tunnel-address> <session-id>` back. The expose command prints the address
+and records the ID that future data connections will use for routing. Rejected
+handshakes return `ERR <reason>` so the expose command can report why
+registration failed. After `OK`, expose keeps the control connection open until
+stopped. The server registers active expose sessions by ID and removes them when
+they disconnect. An accepted session reserves the dynamically allocated tunnel
+port on the server until the expose disconnects.
 Because tunnel ports are allocated independently, different clients may expose
 the same local service port without conflicting. The expose command also exits
 with an error if the server closes the control connection, but tunnel
@@ -67,7 +68,8 @@ and accepts one pending incoming TCP connection while continuing to monitor the
 control connection. This bounded pending connection establishes the boundary
 needed for the forwarding workflow without accumulating unbounded sockets. The
 server sends `INCOMING` over the control connection so the expose client knows a
-tunnel user is waiting.
+tunnel user is waiting. Session IDs are currently monotonic routing identifiers,
+not authentication credentials.
 
 ## Architecture
 
@@ -100,7 +102,7 @@ sequenceDiagram
     E->>S: EXPOSE <port>\n
     S->>S: Register session
     S->>S: Allocate available tunnel port
-    S->>E: OK <tunnel-address>\n
+    S->>E: OK <tunnel-address> <session-id>\n
     Note over E,S: Control connection held open
     U->>S: TCP connect to tunnel address
     S->>S: Hold one pending tunnel connection
