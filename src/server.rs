@@ -2,6 +2,9 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::Duration;
+
+const CONTROL_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 struct ServerState {
     active_exposes: Mutex<Vec<ExposeRegistration>>,
@@ -10,14 +13,14 @@ struct ServerState {
 struct ExposeRegistration {
     peer_address: SocketAddr,
     local_port: u16,
-    // Retaining the listener reserves the tunnel port until the session ends.
-    _tunnel_listener: TcpListener,
 }
 
 struct ExposeSession<'a> {
     state: &'a ServerState,
     peer_address: SocketAddr,
     local_port: u16,
+    // Session ownership keeps the endpoint reserved and closes it on drop.
+    tunnel_listener: TcpListener,
     tunnel_address: SocketAddr,
     active_count: usize,
     is_registered: bool,
@@ -52,6 +55,9 @@ impl ServerState {
         // port namespace and can allocate safely across concurrent sessions.
         let tunnel_listener =
             TcpListener::bind(("127.0.0.1", 0)).map_err(RegisterExposeError::TunnelPort)?;
+        tunnel_listener
+            .set_nonblocking(true)
+            .map_err(RegisterExposeError::TunnelPort)?;
         let tunnel_address = tunnel_listener
             .local_addr()
             .map_err(RegisterExposeError::TunnelPort)?;
@@ -59,7 +65,6 @@ impl ServerState {
         active_exposes.push(ExposeRegistration {
             peer_address,
             local_port,
-            _tunnel_listener: tunnel_listener,
         });
 
         let active_count = active_exposes.len();
@@ -71,6 +76,7 @@ impl ServerState {
             state: self,
             peer_address,
             local_port,
+            tunnel_listener,
             tunnel_address,
             active_count,
             is_registered: true,
@@ -100,6 +106,16 @@ impl ExposeSession<'_> {
     // Returns the actual listener address advertised to the expose client.
     fn tunnel_address(&self) -> SocketAddr {
         self.tunnel_address
+    }
+
+    // Checks for an incoming tunnel user without blocking control-session
+    // monitoring on the same connection thread.
+    fn try_accept_tunnel_connection(&self) -> io::Result<Option<(TcpStream, SocketAddr)>> {
+        match self.tunnel_listener.accept() {
+            Ok(connection) => Ok(Some(connection)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn active_count(&self) -> usize {
@@ -184,7 +200,10 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
                         "registered expose from {peer_address} for local port {local_port}; active exposes: {}",
                         session.active_count()
                     );
-                    wait_for_expose_disconnect(&mut reader)?;
+                    reader
+                        .get_mut()
+                        .set_read_timeout(Some(CONTROL_POLL_TIMEOUT))?;
+                    wait_for_expose_activity(&mut reader, &session)?;
                     let active_count = session.close()?;
 
                     println!(
@@ -215,17 +234,40 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
     Ok(())
 }
 
-// Blocks until the remote end closes its side of the TCP connection. When the
-// expose client disconnects (Ctrl-C, crash, network drop), read_line returns
-// Ok(0), which signals EOF in TCP.
-fn wait_for_expose_disconnect(reader: &mut BufReader<TcpStream>) -> io::Result<()> {
+// Monitors both sides of an expose session without letting either blocking
+// socket operation hide activity from the other side.
+fn wait_for_expose_activity(
+    reader: &mut BufReader<TcpStream>,
+    session: &ExposeSession<'_>,
+) -> io::Result<()> {
     let mut message = String::new();
+    let mut pending_tunnel_connection = None;
 
     loop {
+        if pending_tunnel_connection.is_none() {
+            if let Some((stream, peer_address)) = session.try_accept_tunnel_connection()? {
+                println!(
+                    "accepted tunnel connection from {peer_address} on {}",
+                    session.tunnel_address()
+                );
+
+                // Keep one connection open until the data-forwarding protocol
+                // can hand it to the expose client.
+                pending_tunnel_connection = Some(stream);
+            }
+        }
+
         message.clear();
 
-        if reader.read_line(&mut message)? == 0 {
-            return Ok(());
+        match reader.read_line(&mut message) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error),
         }
     }
 }
@@ -234,7 +276,8 @@ fn wait_for_expose_disconnect(reader: &mut BufReader<TcpStream>) -> io::Result<(
 mod tests {
     use super::ServerState;
     use std::io;
-    use std::net::{SocketAddr, TcpListener};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::thread;
 
     #[test]
     fn separate_clients_can_expose_the_same_local_port() {
@@ -282,6 +325,32 @@ mod tests {
 
         assert_eq!(session.tunnel_address().ip(), peer_address(0).ip());
         assert_ne!(session.tunnel_address().port(), 0);
+    }
+
+    #[test]
+    fn expose_session_accepts_tunnel_connection() {
+        let state = ServerState::new();
+        let session = state
+            .register_expose_session(peer_address(41000), 3000)
+            .expect("expose should register");
+        let tunnel_address = session.tunnel_address();
+
+        let connector_stream = thread::spawn(move || {
+            TcpStream::connect(tunnel_address).expect("tunnel client should connect")
+        })
+        .join()
+        .expect("connector thread should finish");
+        let (_stream, peer_address) = session
+            .try_accept_tunnel_connection()
+            .expect("listener check should succeed")
+            .expect("session should accept tunnel connection");
+
+        assert_eq!(
+            peer_address,
+            connector_stream
+                .local_addr()
+                .expect("connector should have a local address")
+        );
     }
 
     #[test]

@@ -11,7 +11,8 @@ public tunnel, while keeping the codebase small enough to learn from.
 > and the server tracks active expose sessions across connection threads. The
 > server allocates an independent server-side port for each incoming tunnel.
 > Multiple clients can expose services that use the same local port. Traffic
-> forwarding is not implemented yet.
+> forwarding is not implemented yet, but the server can accept one pending
+> tunnel connection per expose session.
 
 ## Goals
 
@@ -61,7 +62,10 @@ dynamically allocated tunnel port on the server until the expose disconnects.
 Because tunnel ports are allocated independently, different clients may expose
 the same local service port without conflicting. The expose command also exits
 with an error if the server closes the control connection, but tunnel
-connections are not forwarded yet.
+connections are not forwarded yet. Each expose session owns its tunnel listener
+and accepts one pending incoming TCP connection while continuing to monitor the
+control connection. This bounded pending connection establishes the boundary
+needed for the forwarding workflow without accumulating unbounded sockets.
 
 ## Architecture
 
@@ -87,6 +91,7 @@ sequenceDiagram
     participant L as Local Service
     participant E as Expose Client
     participant S as Server
+    participant U as Tunnel User
 
     E->>L: TCP connect (verify reachable)
     E->>S: TCP connect
@@ -95,6 +100,8 @@ sequenceDiagram
     S->>S: Allocate available tunnel port
     S->>E: OK <tunnel-address>\n
     Note over E,S: Control connection held open
+    U->>S: TCP connect to tunnel address
+    S->>S: Hold one pending tunnel connection
     E--xS: disconnect
     S->>S: Unregister session
 ```
