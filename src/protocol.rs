@@ -27,6 +27,17 @@ pub enum HandshakeResponseParseError {
     UnknownStatus,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ControlMessage {
+    IncomingConnection,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ControlMessageParseError {
+    Empty,
+    UnknownMessage,
+}
+
 pub fn expose_handshake(local_port: u16) -> String {
     format!("EXPOSE {local_port}\n")
 }
@@ -41,6 +52,20 @@ pub fn ok_response(tunnel_address: SocketAddr) -> String {
 // server refused registration.
 pub fn error_response(message: &str) -> String {
     format!("ERR {message}\n")
+}
+
+// Notifies the expose client that the server is holding a tunnel user socket.
+pub fn incoming_connection_message() -> &'static str {
+    "INCOMING\n"
+}
+
+// Parses messages sent after a successful expose handshake.
+pub fn parse_control_message(line: &str) -> Result<ControlMessage, ControlMessageParseError> {
+    match line.trim_end() {
+        "INCOMING" => Ok(ControlMessage::IncomingConnection),
+        "" => Err(ControlMessageParseError::Empty),
+        _ => Err(ControlMessageParseError::UnknownMessage),
+    }
 }
 
 // Parses the server's response to the initial expose handshake.
@@ -103,7 +128,10 @@ pub fn describe_parse_error(error: HandshakeParseError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_handshake_response, HandshakeResponse, HandshakeResponseParseError};
+    use super::{
+        parse_control_message, parse_handshake_response, ControlMessage, ControlMessageParseError,
+        HandshakeResponse, HandshakeResponseParseError,
+    };
     use std::net::SocketAddr;
 
     #[test]
@@ -155,6 +183,23 @@ mod tests {
         assert_eq!(
             parse_handshake_response("WAIT\n"),
             Err(HandshakeResponseParseError::UnknownStatus)
+        );
+    }
+
+    #[test]
+    fn parses_incoming_connection_message() {
+        assert_eq!(super::incoming_connection_message(), "INCOMING\n");
+        assert_eq!(
+            parse_control_message("INCOMING\n"),
+            Ok(ControlMessage::IncomingConnection)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_control_message() {
+        assert_eq!(
+            parse_control_message("UNKNOWN\n"),
+            Err(ControlMessageParseError::UnknownMessage)
         );
     }
 }

@@ -250,6 +250,9 @@ fn wait_for_expose_activity(
                     "accepted tunnel connection from {peer_address} on {}",
                     session.tunnel_address()
                 );
+                reader
+                    .get_mut()
+                    .write_all(crate::protocol::incoming_connection_message().as_bytes())?;
 
                 // Keep one connection open until the data-forwarding protocol
                 // can hand it to the expose client.

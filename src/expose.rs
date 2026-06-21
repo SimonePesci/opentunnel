@@ -43,24 +43,32 @@ fn keep_control_connection(reader: BufReader<TcpStream>) -> io::Result<()> {
     monitor_control_connection(reader)
 }
 
-// Waits for the first post-handshake control event. The current protocol
-// defines no such messages, so either EOF or data means the session is invalid.
+// Processes post-handshake server events until the control connection closes.
 fn monitor_control_connection(mut reader: impl BufRead) -> io::Result<()> {
     let mut message = String::new();
 
-    // This read blocks while the session is healthy because the current
-    // protocol does not define any messages after the initial OK response.
-    if reader.read_line(&mut message)? == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::ConnectionReset,
-            "opentunnel server closed the control connection",
-        ));
-    }
+    loop {
+        message.clear();
 
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("unexpected server control message: {}", message.trim_end()),
-    ))
+        if reader.read_line(&mut message)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "opentunnel server closed the control connection",
+            ));
+        }
+
+        match crate::protocol::parse_control_message(&message) {
+            Ok(crate::protocol::ControlMessage::IncomingConnection) => {
+                println!("incoming tunnel connection is waiting on the server");
+            }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected server control message: {}", message.trim_end()),
+                ));
+            }
+        }
+    }
 }
 
 // Converts the wire response into errors meaningful to the CLI caller.
@@ -118,6 +126,14 @@ mod tests {
     fn closed_control_connection_returns_connection_error() {
         let error = monitor_control_connection(Cursor::new(Vec::<u8>::new()))
             .expect_err("closed control connection should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    #[test]
+    fn incoming_connection_message_keeps_monitoring() {
+        let error = monitor_control_connection(Cursor::new(b"INCOMING\n"))
+            .expect_err("EOF after a valid message should close the session");
 
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
     }

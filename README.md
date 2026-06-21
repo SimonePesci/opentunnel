@@ -65,7 +65,9 @@ with an error if the server closes the control connection, but tunnel
 connections are not forwarded yet. Each expose session owns its tunnel listener
 and accepts one pending incoming TCP connection while continuing to monitor the
 control connection. This bounded pending connection establishes the boundary
-needed for the forwarding workflow without accumulating unbounded sockets.
+needed for the forwarding workflow without accumulating unbounded sockets. The
+server sends `INCOMING` over the control connection so the expose client knows a
+tunnel user is waiting.
 
 ## Architecture
 
@@ -102,6 +104,7 @@ sequenceDiagram
     Note over E,S: Control connection held open
     U->>S: TCP connect to tunnel address
     S->>S: Hold one pending tunnel connection
+    S->>E: INCOMING\n
     E--xS: disconnect
     S->>S: Unregister session
 ```
