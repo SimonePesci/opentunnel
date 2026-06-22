@@ -2,13 +2,16 @@ use std::net::SocketAddr;
 
 pub enum Handshake {
     Expose { local_port: u16 },
+    Forward { session_id: u64 },
 }
 
 pub enum HandshakeParseError {
     Empty,
     ExtraParts,
     InvalidPort,
+    InvalidSessionId,
     MissingPort,
+    MissingSessionId,
     UnknownCommand,
 }
 
@@ -48,6 +51,10 @@ pub fn expose_handshake(local_port: u16) -> String {
     format!("EXPOSE {local_port}\n")
 }
 
+pub fn forward_handshake(session_id: u64) -> String {
+    format!("FORWARD {session_id}\n")
+}
+
 // Includes the bound endpoint so the expose client can show where the tunnel
 // is reachable instead of reconstructing server-side binding details.
 pub fn ok_response(tunnel_address: SocketAddr, session_id: u64) -> String {
@@ -63,6 +70,14 @@ pub fn error_response(message: &str) -> String {
 // Notifies the expose client that the server is holding a tunnel user socket.
 pub fn incoming_connection_message() -> &'static str {
     "INCOMING\n"
+}
+
+pub fn forward_ready_response() -> &'static str {
+    "READY\n"
+}
+
+pub fn is_forward_ready_response(line: &str) -> bool {
+    line.trim_end() == "READY"
 }
 
 // Parses messages sent after a successful expose handshake.
@@ -125,18 +140,35 @@ pub fn parse_handshake_response(
 pub fn parse_handshake(line: &str) -> Result<Handshake, HandshakeParseError> {
     let mut parts = line.split_whitespace();
 
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some("EXPOSE"), Some(port), None) => {
+    match parts.next() {
+        Some("EXPOSE") => {
+            let port = parts.next().ok_or(HandshakeParseError::MissingPort)?;
+
+            if parts.next().is_some() {
+                return Err(HandshakeParseError::ExtraParts);
+            }
+
             let local_port = port
                 .parse::<u16>()
                 .map_err(|_| HandshakeParseError::InvalidPort)?;
 
             Ok(Handshake::Expose { local_port })
         }
-        (Some("EXPOSE"), None, None) => Err(HandshakeParseError::MissingPort),
-        (Some("EXPOSE"), Some(_), Some(_)) => Err(HandshakeParseError::ExtraParts),
-        (Some(_), _, _) => Err(HandshakeParseError::UnknownCommand),
-        (None, _, _) => Err(HandshakeParseError::Empty),
+        Some("FORWARD") => {
+            let session_id = parts.next().ok_or(HandshakeParseError::MissingSessionId)?;
+
+            if parts.next().is_some() {
+                return Err(HandshakeParseError::ExtraParts);
+            }
+
+            let session_id = session_id
+                .parse::<u64>()
+                .map_err(|_| HandshakeParseError::InvalidSessionId)?;
+
+            Ok(Handshake::Forward { session_id })
+        }
+        Some(_) => Err(HandshakeParseError::UnknownCommand),
+        None => Err(HandshakeParseError::Empty),
     }
 }
 
@@ -145,7 +177,9 @@ pub fn describe_parse_error(error: HandshakeParseError) -> &'static str {
         HandshakeParseError::Empty => "empty handshake",
         HandshakeParseError::ExtraParts => "too many handshake parts",
         HandshakeParseError::InvalidPort => "invalid expose port",
+        HandshakeParseError::InvalidSessionId => "invalid session ID",
         HandshakeParseError::MissingPort => "missing expose port",
+        HandshakeParseError::MissingSessionId => "missing session ID",
         HandshakeParseError::UnknownCommand => "unknown handshake command",
     }
 }
@@ -175,6 +209,38 @@ mod tests {
                 session_id: 42,
             })
         );
+    }
+
+    #[test]
+    fn formats_and_parses_forward_handshake() {
+        assert_eq!(super::forward_handshake(42), "FORWARD 42\n");
+        assert!(matches!(
+            super::parse_handshake("FORWARD 42\n"),
+            Ok(super::Handshake::Forward { session_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_forward_session_id() {
+        assert!(matches!(
+            super::parse_handshake("FORWARD invalid\n"),
+            Err(super::HandshakeParseError::InvalidSessionId)
+        ));
+    }
+
+    #[test]
+    fn rejects_forward_without_session_id() {
+        assert!(matches!(
+            super::parse_handshake("FORWARD\n"),
+            Err(super::HandshakeParseError::MissingSessionId)
+        ));
+    }
+
+    #[test]
+    fn formats_and_recognizes_forward_ready_response() {
+        assert_eq!(super::forward_ready_response(), "READY\n");
+        assert!(super::is_forward_ready_response("READY\n"));
+        assert!(!super::is_forward_ready_response("ERR\n"));
     }
 
     #[test]

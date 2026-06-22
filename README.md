@@ -69,7 +69,9 @@ control connection. This bounded pending connection establishes the boundary
 needed for the forwarding workflow without accumulating unbounded sockets. The
 server sends `INCOMING` over the control connection so the expose client knows a
 tunnel user is waiting. Session IDs are currently monotonic routing identifiers,
-not authentication credentials.
+not authentication credentials. After `INCOMING`, the expose client opens a
+separate connection with `FORWARD <session-id>`. The server replies `READY` and
+holds that data stream for the upcoming byte-relay step.
 
 ## Architecture
 
@@ -107,6 +109,10 @@ sequenceDiagram
     U->>S: TCP connect to tunnel address
     S->>S: Hold one pending tunnel connection
     S->>E: INCOMING\n
+    E->>S: New TCP connection
+    E->>S: FORWARD <session-id>\n
+    S->>E: READY\n
+    Note over E,S: Forward stream held open
     E--xS: disconnect
     S->>S: Unregister session
 ```
