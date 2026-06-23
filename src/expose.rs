@@ -1,5 +1,6 @@
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::thread;
 use std::time::Duration;
 
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -33,7 +34,7 @@ pub fn run(local_port: u16, server_address: SocketAddr) -> io::Result<()> {
     println!("server accepted expose handshake");
     println!("registered expose session {session_id}");
     println!("tunnel available on {tunnel_address}");
-    keep_control_connection(reader, server_address, session_id)
+    keep_control_connection(reader, server_address, session_id, local_address)
 }
 
 // Keeps the expose process tied to the lifetime of the server-side session.
@@ -41,12 +42,12 @@ fn keep_control_connection(
     reader: BufReader<TcpStream>,
     server_address: SocketAddr,
     session_id: u64,
+    local_address: SocketAddr,
 ) -> io::Result<()> {
     println!("expose session active; press Ctrl-C to stop");
-    println!("tunneling is not implemented yet");
 
     monitor_control_connection(reader, || {
-        open_forward_connection(server_address, session_id)
+        start_forwarding(server_address, session_id, local_address)
     })
 }
 
@@ -98,14 +99,60 @@ fn open_forward_connection(server_address: SocketAddr, session_id: u64) -> io::R
     stream.write_all(crate::protocol::forward_handshake(session_id).as_bytes())?;
     stream.set_read_timeout(Some(SERVER_READ_TIMEOUT))?;
 
-    let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
+    let response = read_forward_response(&mut stream)?;
     validate_forward_response(&response)?;
 
-    let stream = reader.into_inner();
     stream.set_read_timeout(None)?;
     Ok(stream)
+}
+
+// Reads only through the protocol newline so immediately following raw tunnel
+// bytes remain unread on the socket.
+fn read_forward_response(stream: &mut TcpStream) -> io::Result<String> {
+    const MAX_RESPONSE_BYTES: usize = 256;
+    let mut response = Vec::new();
+    let mut byte = [0; 1];
+
+    while response.len() < MAX_RESPONSE_BYTES {
+        if stream.read(&mut byte)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "server closed during forward response",
+            ));
+        }
+
+        response.push(byte[0]);
+        if byte[0] == b'\n' {
+            return String::from_utf8(response).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "server forward response was not UTF-8",
+                )
+            });
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "server forward response exceeded 256 bytes",
+    ))
+}
+
+// Connects both client-side endpoints, then relays without blocking control
+// messages such as a future disconnect or additional incoming notification.
+fn start_forwarding(
+    server_address: SocketAddr,
+    session_id: u64,
+    local_address: SocketAddr,
+) -> io::Result<thread::JoinHandle<()>> {
+    let forward_stream = open_forward_connection(server_address, session_id)?;
+    let local_stream = TcpStream::connect_timeout(&local_address, LOCAL_CONNECT_TIMEOUT)?;
+
+    Ok(thread::spawn(move || {
+        if let Err(error) = crate::relay::copy_bidirectional(forward_stream, local_stream) {
+            eprintln!("error: local relay failed for session {session_id}: {error}");
+        }
+    }))
 }
 
 fn validate_forward_response(response: &str) -> io::Result<()> {
@@ -147,11 +194,13 @@ fn validate_handshake_response(response: &str) -> io::Result<(SocketAddr, u64)> 
 #[cfg(test)]
 mod tests {
     use super::{
-        monitor_control_connection, validate_forward_response, validate_handshake_response,
+        monitor_control_connection, start_forwarding, validate_forward_response,
+        validate_handshake_response,
     };
     use std::cell::Cell;
-    use std::io::{self, Cursor};
-    use std::net::SocketAddr;
+    use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
+    use std::net::{Shutdown, SocketAddr, TcpListener};
+    use std::thread;
 
     #[test]
     fn accepted_handshake_returns_tunnel_address() {
@@ -220,5 +269,68 @@ mod tests {
         let error = validate_forward_response("ERR unknown expose session\n")
             .expect_err("forward rejection should fail");
         assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn forwarding_round_trips_bytes_through_local_service() {
+        let local_listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("local listener should bind");
+        let local_address = local_listener
+            .local_addr()
+            .expect("local listener should have an address");
+        let local_service = thread::spawn(move || {
+            let (mut stream, _) = local_listener
+                .accept()
+                .expect("local service should accept");
+            let mut request = [0; 4];
+            stream
+                .read_exact(&mut request)
+                .expect("local service should read request");
+            assert_eq!(&request, b"ping");
+            stream
+                .write_all(b"pong")
+                .expect("local service should write response");
+            stream
+                .shutdown(Shutdown::Write)
+                .expect("local service should close response");
+        });
+
+        let server_listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("server listener should bind");
+        let server_address = server_listener
+            .local_addr()
+            .expect("server listener should have an address");
+        let forward_server = thread::spawn(move || {
+            let (stream, _) = server_listener
+                .accept()
+                .expect("server should accept forward");
+            let mut reader = BufReader::new(stream);
+            let mut handshake = String::new();
+            reader
+                .read_line(&mut handshake)
+                .expect("server should read forward handshake");
+            assert_eq!(handshake, "FORWARD 42\n");
+
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(b"READY\nping")
+                .expect("server should acknowledge and send request");
+            stream
+                .shutdown(Shutdown::Write)
+                .expect("server should close request");
+
+            let mut response = [0; 4];
+            stream
+                .read_exact(&mut response)
+                .expect("server should read response");
+            assert_eq!(&response, b"pong");
+        });
+
+        start_forwarding(server_address, 42, local_address)
+            .expect("forwarding should start")
+            .join()
+            .expect("forward relay should finish");
+        forward_server.join().expect("forward server should finish");
+        local_service.join().expect("local service should finish");
     }
 }

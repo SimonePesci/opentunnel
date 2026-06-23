@@ -10,9 +10,8 @@ public tunnel, while keeping the codebase small enough to learn from.
 > acknowledges. The expose control connection stays open after registration,
 > and the server tracks active expose sessions across connection threads. The
 > server allocates an independent server-side port for each incoming tunnel.
-> Multiple clients can expose services that use the same local port. Traffic
-> forwarding is not implemented yet, but the server can accept one pending
-> tunnel connection per expose session.
+> Multiple clients can expose services that use the same local port. One
+> bidirectional tunnel connection can now be forwarded per expose session.
 
 ## Goals
 
@@ -62,16 +61,14 @@ they disconnect. An accepted session reserves the dynamically allocated tunnel
 port on the server until the expose disconnects.
 Because tunnel ports are allocated independently, different clients may expose
 the same local service port without conflicting. The expose command also exits
-with an error if the server closes the control connection, but tunnel
-connections are not forwarded yet. Each expose session owns its tunnel listener
-and accepts one pending incoming TCP connection while continuing to monitor the
-control connection. This bounded pending connection establishes the boundary
-needed for the forwarding workflow without accumulating unbounded sockets. The
-server sends `INCOMING` over the control connection so the expose client knows a
-tunnel user is waiting. Session IDs are currently monotonic routing identifiers,
-not authentication credentials. After `INCOMING`, the expose client opens a
-separate connection with `FORWARD <session-id>`. The server replies `READY` and
-holds that data stream for the upcoming byte-relay step.
+with an error if the server closes the control connection. Each expose session
+accepts one incoming TCP connection while continuing to monitor its control
+connection. The server sends `INCOMING` so the expose client opens a separate
+connection with `FORWARD <session-id>`. After `READY`, the server pairs the
+tunnel user with that forward stream, while the expose client pairs it with a
+fresh connection to the local service. Both sides then copy bytes
+bidirectionally. Session IDs are currently monotonic routing identifiers, not
+authentication credentials.
 
 ## Architecture
 
@@ -112,7 +109,8 @@ sequenceDiagram
     E->>S: New TCP connection
     E->>S: FORWARD <session-id>\n
     S->>E: READY\n
-    Note over E,S: Forward stream held open
+    E->>L: New local TCP connection
+    Note over U,L: Bytes copied bidirectionally
     E--xS: disconnect
     S->>S: Unregister session
 ```
@@ -127,6 +125,7 @@ opentunnel/
     ├── expose.rs
     ├── main.rs
     ├── protocol.rs
+    ├── relay.rs
     └── server.rs
 ```
 

@@ -14,7 +14,13 @@ struct ServerState {
 
 struct ExposeRegistration {
     session_id: u64,
-    forward_stream: Option<TcpStream>,
+    forward_stream: ForwardStreamState,
+}
+
+enum ForwardStreamState {
+    Empty,
+    Waiting(TcpStream),
+    Claimed,
 }
 
 struct ExposeSession<'a> {
@@ -39,6 +45,7 @@ enum RegisterExposeError {
 #[derive(Debug)]
 enum AttachForwardError {
     Duplicate,
+    Response(io::Error),
     State(io::Error),
     UnknownSession,
 }
@@ -82,7 +89,7 @@ impl ServerState {
 
         active_exposes.push(ExposeRegistration {
             session_id,
-            forward_stream: None,
+            forward_stream: ForwardStreamState::Empty,
         });
 
         let active_count = active_exposes.len();
@@ -121,7 +128,7 @@ impl ServerState {
     fn attach_forward_stream(
         &self,
         session_id: u64,
-        stream: TcpStream,
+        mut stream: TcpStream,
     ) -> Result<(), (AttachForwardError, TcpStream)> {
         let mut active_exposes = match self.lock_active_exposes() {
             Ok(active_exposes) => active_exposes,
@@ -134,12 +141,40 @@ impl ServerState {
             return Err((AttachForwardError::UnknownSession, stream));
         };
 
-        if registration.forward_stream.is_some() {
+        if !matches!(registration.forward_stream, ForwardStreamState::Empty) {
             return Err((AttachForwardError::Duplicate, stream));
         }
 
-        registration.forward_stream = Some(stream);
+        // READY must reach the client before the session loop can relay raw
+        // bytes over this stream.
+        if let Err(error) = stream.write_all(crate::protocol::forward_ready_response().as_bytes()) {
+            return Err((AttachForwardError::Response(error), stream));
+        }
+
+        registration.forward_stream = ForwardStreamState::Waiting(stream);
         Ok(())
+    }
+
+    fn take_forward_stream(&self, session_id: u64) -> io::Result<Option<TcpStream>> {
+        let mut active_exposes = self.lock_active_exposes()?;
+        let Some(registration) = active_exposes
+            .iter_mut()
+            .find(|registration| registration.session_id == session_id)
+        else {
+            return Ok(None);
+        };
+
+        let ForwardStreamState::Waiting(_) = registration.forward_stream else {
+            return Ok(None);
+        };
+
+        match std::mem::replace(
+            &mut registration.forward_stream,
+            ForwardStreamState::Claimed,
+        ) {
+            ForwardStreamState::Waiting(stream) => Ok(Some(stream)),
+            _ => unreachable!("waiting forward stream was checked before replacement"),
+        }
     }
 
     fn lock_active_exposes(&self) -> io::Result<MutexGuard<'_, Vec<ExposeRegistration>>> {
@@ -168,6 +203,10 @@ impl ExposeSession<'_> {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn try_take_forward_stream(&self) -> io::Result<Option<TcpStream>> {
+        self.state.take_forward_stream(self.session_id)
     }
 
     fn active_count(&self) -> usize {
@@ -280,13 +319,10 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
             }
         }
         Ok(crate::protocol::Handshake::Forward { session_id }) => {
-            let mut response_stream = reader.get_ref().try_clone()?;
             let forward_stream = reader.into_inner();
 
             match state.attach_forward_stream(session_id, forward_stream) {
                 Ok(()) => {
-                    response_stream
-                        .write_all(crate::protocol::forward_ready_response().as_bytes())?;
                     println!(
                         "registered forward stream from {peer_address} for session {session_id}"
                     );
@@ -308,6 +344,7 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
                         "rejected forward stream from {peer_address}; unknown session {session_id}"
                     );
                 }
+                Err((AttachForwardError::Response(error), _stream)) => return Err(error),
                 Err((AttachForwardError::State(error), _stream)) => return Err(error),
             }
         }
@@ -331,9 +368,10 @@ fn wait_for_expose_activity(
 ) -> io::Result<()> {
     let mut message = String::new();
     let mut pending_tunnel_connection = None;
+    let mut relay_started = false;
 
     loop {
-        if pending_tunnel_connection.is_none() {
+        if !relay_started && pending_tunnel_connection.is_none() {
             if let Some((stream, peer_address)) = session.try_accept_tunnel_connection()? {
                 println!(
                     "accepted tunnel connection from {peer_address} on {}",
@@ -347,6 +385,24 @@ fn wait_for_expose_activity(
                 // can hand it to the expose client.
                 pending_tunnel_connection = Some(stream);
             }
+        }
+
+        if let Some(forward_stream) = session.try_take_forward_stream()? {
+            let tunnel_stream = pending_tunnel_connection
+                .take()
+                .ok_or_else(|| io::Error::other("forward stream arrived without tunnel user"))?;
+            let session_id = session.session_id();
+
+            // Relaying blocks until both peers close, so keep control-session
+            // monitoring on this thread and move byte copying to a worker.
+            thread::spawn(move || {
+                if let Err(error) = crate::relay::copy_bidirectional(tunnel_stream, forward_stream)
+                {
+                    eprintln!("error: relay failed for session {session_id}: {error}");
+                }
+            });
+            relay_started = true;
+            println!("started server relay for session {session_id}");
         }
 
         message.clear();
@@ -367,7 +423,7 @@ fn wait_for_expose_activity(
 #[cfg(test)]
 mod tests {
     use super::{AttachForwardError, ServerState};
-    use std::io;
+    use std::io::{self, BufRead, BufReader};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::thread;
 
@@ -463,6 +519,33 @@ mod tests {
             state.attach_forward_stream(session.session_id(), second_server),
             Err((AttachForwardError::Duplicate, _))
         ));
+    }
+
+    #[test]
+    fn attached_forward_stream_is_ready_and_claimed_once() {
+        let state = ServerState::new();
+        let session = state
+            .register_expose_session(peer_address(41000), 3000)
+            .expect("expose should register");
+        let (client, server) = connected_stream_pair();
+
+        state
+            .attach_forward_stream(session.session_id(), server)
+            .expect("forward stream should attach");
+
+        let mut response = String::new();
+        BufReader::new(client)
+            .read_line(&mut response)
+            .expect("ready response should be readable");
+        assert_eq!(response, "READY\n");
+        assert!(session
+            .try_take_forward_stream()
+            .expect("first claim should succeed")
+            .is_some());
+        assert!(session
+            .try_take_forward_stream()
+            .expect("second claim should succeed")
+            .is_none());
     }
 
     #[test]
