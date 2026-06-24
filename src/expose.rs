@@ -141,8 +141,10 @@ fn start_forwarding(
     session_id: u64,
     local_address: SocketAddr,
 ) -> io::Result<thread::JoinHandle<()>> {
-    let forward_stream = open_forward_connection(server_address, session_id)?;
+    // Connect locally first so we do not register a READY forward stream with
+    // the server unless there is a local service socket to relay to.
     let local_stream = TcpStream::connect_timeout(&local_address, LOCAL_CONNECT_TIMEOUT)?;
+    let forward_stream = open_forward_connection(server_address, session_id)?;
 
     Ok(thread::spawn(move || {
         if let Err(error) = crate::relay::copy_bidirectional(forward_stream, local_stream) {
@@ -196,7 +198,9 @@ mod tests {
     use std::cell::Cell;
     use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
     use std::net::{Shutdown, SocketAddr, TcpListener};
+    use std::sync::mpsc;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn accepted_handshake_returns_tunnel_address() {
@@ -341,5 +345,74 @@ mod tests {
             .expect("forward relay should finish");
         forward_server.join().expect("forward server should finish");
         local_service.join().expect("local service should finish");
+    }
+
+    #[test]
+    fn forwarding_checks_local_service_before_opening_forward_connection() {
+        let local_address = unavailable_local_address();
+        let server_listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("server listener should bind");
+        server_listener
+            .set_nonblocking(true)
+            .expect("server listener should become nonblocking");
+        let server_address = server_listener
+            .local_addr()
+            .expect("server listener should have an address");
+        let (accepted_sender, accepted_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(200);
+
+            loop {
+                match server_listener.accept() {
+                    Ok((stream, _)) => {
+                        accepted_sender
+                            .send(true)
+                            .expect("accept result should be sent");
+
+                        let mut reader = BufReader::new(stream);
+                        let mut handshake = String::new();
+                        reader
+                            .read_line(&mut handshake)
+                            .expect("server should read forward handshake");
+                        assert_eq!(handshake, "FORWARD 42\n");
+                        reader
+                            .get_mut()
+                            .write_all(b"READY\n")
+                            .expect("server should acknowledge forward");
+                        return;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            accepted_sender
+                                .send(false)
+                                .expect("accept result should be sent");
+                            return;
+                        }
+
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("server accept failed: {error}"),
+                }
+            }
+        });
+
+        let error = start_forwarding(server_address, 42, local_address)
+            .expect_err("unavailable local service should fail forwarding");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(!accepted_receiver
+            .recv()
+            .expect("fake server should report whether it accepted"));
+        server.join().expect("fake server should finish");
+    }
+
+    fn unavailable_local_address() -> SocketAddr {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("local listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("local listener should have an address");
+        drop(listener);
+
+        address
     }
 }

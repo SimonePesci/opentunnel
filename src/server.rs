@@ -470,6 +470,7 @@ mod tests {
     use std::io::{self, BufRead, BufReader};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn separate_clients_can_expose_the_same_local_port() {
@@ -533,10 +534,7 @@ mod tests {
         })
         .join()
         .expect("connector thread should finish");
-        let (_stream, peer_address) = session
-            .try_accept_tunnel_connection()
-            .expect("listener check should succeed")
-            .expect("session should accept tunnel connection");
+        let (_stream, peer_address) = wait_for_tunnel_connection(&session);
 
         assert_eq!(
             peer_address,
@@ -709,5 +707,22 @@ mod tests {
         let (server, _) = listener.accept().expect("pair server should accept");
 
         (client, server)
+    }
+
+    fn wait_for_tunnel_connection(session: &super::ExposeSession<'_>) -> (TcpStream, SocketAddr) {
+        let deadline = Instant::now() + Duration::from_millis(200);
+
+        loop {
+            match session
+                .try_accept_tunnel_connection()
+                .expect("listener check should succeed")
+            {
+                Some(connection) => return connection,
+                None if Instant::now() >= deadline => {
+                    panic!("session should accept tunnel connection")
+                }
+                None => thread::sleep(Duration::from_millis(10)),
+            }
+        }
     }
 }
