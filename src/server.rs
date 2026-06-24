@@ -476,8 +476,8 @@ fn wait_for_expose_activity(
 #[cfg(test)]
 mod tests {
     use super::{AttachForwardError, ServerState};
-    use std::io::{self, BufRead, BufReader, Read};
-    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -746,6 +746,50 @@ mod tests {
         });
     }
 
+    #[test]
+    fn sequential_tunnel_connections_relay_through_same_session() {
+        let state = ServerState::new();
+        let session = state
+            .register_expose_session(peer_address(41000), 3000)
+            .expect("expose should register");
+        let tunnel_address = session.tunnel_address();
+        let (control_client, control_server) = connected_stream_pair();
+        control_server
+            .set_read_timeout(Some(super::CONTROL_POLL_TIMEOUT))
+            .expect("control server should accept read timeout");
+
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut reader = BufReader::new(control_server);
+                super::wait_for_expose_activity(&mut reader, &session)
+            });
+            let mut control_reader = BufReader::new(control_client);
+
+            relay_one_tunnel_user(
+                &state,
+                &session,
+                tunnel_address,
+                &mut control_reader,
+                b"first",
+                b"reply-one",
+            );
+            relay_one_tunnel_user(
+                &state,
+                &session,
+                tunnel_address,
+                &mut control_reader,
+                b"second",
+                b"reply-two",
+            );
+
+            drop(control_reader);
+            worker
+                .join()
+                .expect("control worker should finish")
+                .expect("control worker should exit cleanly");
+        });
+    }
+
     fn peer_address(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
     }
@@ -785,5 +829,67 @@ mod tests {
                 None => thread::sleep(Duration::from_millis(10)),
             }
         }
+    }
+
+    fn relay_one_tunnel_user(
+        state: &ServerState,
+        session: &super::ExposeSession<'_>,
+        tunnel_address: SocketAddr,
+        control_reader: &mut BufReader<TcpStream>,
+        request: &[u8],
+        response: &[u8],
+    ) {
+        let mut tunnel_client =
+            TcpStream::connect(tunnel_address).expect("tunnel user should connect");
+        tunnel_client
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("tunnel user should accept read timeout");
+
+        let mut control_message = String::new();
+        control_reader
+            .read_line(&mut control_message)
+            .expect("control client should read incoming message");
+        assert_eq!(control_message, "INCOMING\n");
+
+        let (forward_client, forward_server) = connected_stream_pair();
+        state
+            .attach_forward_stream(session.session_id(), forward_server)
+            .expect("forward stream should attach");
+
+        let mut forward_reader = BufReader::new(forward_client);
+        let mut ready = String::new();
+        forward_reader
+            .read_line(&mut ready)
+            .expect("forward client should read ready response");
+        assert_eq!(ready, "READY\n");
+        let mut forward_client = forward_reader.into_inner();
+        forward_client
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("forward client should accept read timeout");
+
+        tunnel_client
+            .write_all(request)
+            .expect("tunnel user should write request");
+        let mut forwarded_request = vec![0; request.len()];
+        forward_client
+            .read_exact(&mut forwarded_request)
+            .expect("forward client should read request");
+        assert_eq!(forwarded_request, request);
+
+        forward_client
+            .write_all(response)
+            .expect("forward client should write response");
+        let mut tunneled_response = vec![0; response.len()];
+        tunnel_client
+            .read_exact(&mut tunneled_response)
+            .expect("tunnel user should read response");
+        assert_eq!(tunneled_response, response);
+
+        tunnel_client
+            .shutdown(Shutdown::Write)
+            .expect("tunnel user should close write side");
+        forward_client
+            .shutdown(Shutdown::Write)
+            .expect("forward client should close write side");
     }
 }
