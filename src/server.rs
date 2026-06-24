@@ -411,8 +411,17 @@ fn wait_for_expose_activity(
     let mut pending_tunnel_connection = None;
 
     loop {
-        if pending_tunnel_connection.is_none() {
-            if let Some((stream, peer_address)) = session.try_accept_tunnel_connection()? {
+        if let Some((stream, peer_address)) = session.try_accept_tunnel_connection()? {
+            if pending_tunnel_connection.is_some() {
+                // Only one tunnel user can wait for the next FORWARD stream.
+                // Close extras immediately instead of letting them sit queued
+                // in the OS backlog with unclear behavior.
+                drop(stream);
+                println!(
+                    "rejected extra tunnel connection from {peer_address} on {}",
+                    session.tunnel_address()
+                );
+            } else {
                 println!(
                     "accepted tunnel connection from {peer_address} on {}",
                     session.tunnel_address()
@@ -467,7 +476,7 @@ fn wait_for_expose_activity(
 #[cfg(test)]
 mod tests {
     use super::{AttachForwardError, ServerState};
-    use std::io::{self, BufRead, BufReader};
+    use std::io::{self, BufRead, BufReader, Read};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -683,6 +692,58 @@ mod tests {
         drop(session);
 
         assert!(TcpListener::bind(tunnel_address).is_ok());
+    }
+
+    #[test]
+    fn pending_tunnel_connection_rejects_extra_tunnel_users() {
+        let state = ServerState::new();
+        let session = state
+            .register_expose_session(peer_address(41000), 3000)
+            .expect("expose should register");
+        let tunnel_address = session.tunnel_address();
+        let (control_client, control_server) = connected_stream_pair();
+        control_server
+            .set_read_timeout(Some(super::CONTROL_POLL_TIMEOUT))
+            .expect("control server should accept read timeout");
+
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut reader = BufReader::new(control_server);
+                super::wait_for_expose_activity(&mut reader, &session)
+            });
+
+            let _first_client =
+                TcpStream::connect(tunnel_address).expect("first tunnel user should connect");
+            let mut control_message = String::new();
+            BufReader::new(
+                control_client
+                    .try_clone()
+                    .expect("control client should clone"),
+            )
+            .read_line(&mut control_message)
+            .expect("control client should read incoming message");
+            assert_eq!(control_message, "INCOMING\n");
+
+            let mut second_client =
+                TcpStream::connect(tunnel_address).expect("second tunnel user should connect");
+            second_client
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .expect("second client should accept read timeout");
+
+            let mut byte = [0; 1];
+            assert_eq!(
+                second_client
+                    .read(&mut byte)
+                    .expect("second tunnel user should be closed"),
+                0
+            );
+
+            drop(control_client);
+            worker
+                .join()
+                .expect("control worker should finish")
+                .expect("control worker should exit cleanly");
+        });
     }
 
     fn peer_address(port: u16) -> SocketAddr {
