@@ -62,13 +62,13 @@ port on the server until the expose disconnects.
 Because tunnel ports are allocated independently, different clients may expose
 the same local service port without conflicting. The expose command also exits
 with an error if the server closes the control connection. Each expose session
-accepts one incoming TCP connection while continuing to monitor its control
-connection. The server sends `INCOMING` so the expose client opens a separate
-connection with `FORWARD <session-id>`. After `READY`, the server pairs the
-tunnel user with that forward stream, while the expose client pairs it with a
-fresh connection to the local service. Both sides then copy bytes
-bidirectionally. Session IDs are currently monotonic routing identifiers, not
-authentication credentials.
+accepts incoming TCP connections one at a time while continuing to monitor its
+control connection. The server sends `INCOMING` for each waiting tunnel user so
+the expose client opens a separate connection with `FORWARD <session-id>`.
+After `READY`, the server pairs the tunnel user with that forward stream, while
+the expose client pairs it with a fresh connection to the local service. Both
+sides then copy bytes bidirectionally. Session IDs are currently monotonic
+routing identifiers, not authentication credentials.
 
 ## Architecture
 

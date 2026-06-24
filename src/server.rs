@@ -19,8 +19,8 @@ struct ExposeRegistration {
 
 enum ForwardStreamState {
     Empty,
+    Requested,
     Waiting(TcpStream),
-    Claimed,
 }
 
 struct ExposeSession<'a> {
@@ -45,6 +45,7 @@ enum RegisterExposeError {
 #[derive(Debug)]
 enum AttachForwardError {
     Duplicate,
+    NoPendingTunnel,
     Response(io::Error),
     State(io::Error),
     UnknownSession,
@@ -122,6 +123,29 @@ impl ServerState {
         Ok(active_exposes.len())
     }
 
+    // Marks that a tunnel user is waiting and the expose client should open a
+    // matching FORWARD stream. We keep this explicit so FORWARD streams cannot
+    // be accepted before there is a real tunnel connection to pair with.
+    fn request_forward_stream(&self, session_id: u64) -> io::Result<()> {
+        let mut active_exposes = self.lock_active_exposes()?;
+        let Some(registration) = active_exposes
+            .iter_mut()
+            .find(|registration| registration.session_id == session_id)
+        else {
+            return Ok(());
+        };
+
+        if !matches!(registration.forward_stream, ForwardStreamState::Empty) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "forward stream request already pending",
+            ));
+        }
+
+        registration.forward_stream = ForwardStreamState::Requested;
+        Ok(())
+    }
+
     // Registers the data stream that will later be paired with this session's
     // pending tunnel user. Returning the stream on failure lets the caller send
     // a rejection before closing it.
@@ -141,8 +165,14 @@ impl ServerState {
             return Err((AttachForwardError::UnknownSession, stream));
         };
 
-        if !matches!(registration.forward_stream, ForwardStreamState::Empty) {
-            return Err((AttachForwardError::Duplicate, stream));
+        match &registration.forward_stream {
+            ForwardStreamState::Empty => {
+                return Err((AttachForwardError::NoPendingTunnel, stream));
+            }
+            ForwardStreamState::Requested => {}
+            ForwardStreamState::Waiting(_) => {
+                return Err((AttachForwardError::Duplicate, stream));
+            }
         }
 
         // READY must reach the client before the session loop can relay raw
@@ -155,6 +185,8 @@ impl ServerState {
         Ok(())
     }
 
+    // If the forward stream is waiting, take it and return it to the caller.
+    // Otherwise, return None. Reset the forward stream state to Empty.
     fn take_forward_stream(&self, session_id: u64) -> io::Result<Option<TcpStream>> {
         let mut active_exposes = self.lock_active_exposes()?;
         let Some(registration) = active_exposes
@@ -168,10 +200,7 @@ impl ServerState {
             return Ok(None);
         };
 
-        match std::mem::replace(
-            &mut registration.forward_stream,
-            ForwardStreamState::Claimed,
-        ) {
+        match std::mem::replace(&mut registration.forward_stream, ForwardStreamState::Empty) {
             ForwardStreamState::Waiting(stream) => Ok(Some(stream)),
             _ => unreachable!("waiting forward stream was checked before replacement"),
         }
@@ -207,6 +236,10 @@ impl ExposeSession<'_> {
 
     fn try_take_forward_stream(&self) -> io::Result<Option<TcpStream>> {
         self.state.take_forward_stream(self.session_id)
+    }
+
+    fn request_forward_stream(&self) -> io::Result<()> {
+        self.state.request_forward_stream(self.session_id)
     }
 
     fn active_count(&self) -> usize {
@@ -344,6 +377,14 @@ fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> io::Result<(
                         "rejected forward stream from {peer_address}; unknown session {session_id}"
                     );
                 }
+                Err((AttachForwardError::NoPendingTunnel, mut stream)) => {
+                    stream.write_all(
+                        crate::protocol::error_response("no tunnel connection waiting").as_bytes(),
+                    )?;
+                    println!(
+                        "rejected forward stream from {peer_address}; no tunnel connection waiting for session {session_id}"
+                    );
+                }
                 Err((AttachForwardError::Response(error), _stream)) => return Err(error),
                 Err((AttachForwardError::State(error), _stream)) => return Err(error),
             }
@@ -368,15 +409,18 @@ fn wait_for_expose_activity(
 ) -> io::Result<()> {
     let mut message = String::new();
     let mut pending_tunnel_connection = None;
-    let mut relay_started = false;
 
     loop {
-        if !relay_started && pending_tunnel_connection.is_none() {
+        if pending_tunnel_connection.is_none() {
             if let Some((stream, peer_address)) = session.try_accept_tunnel_connection()? {
                 println!(
                     "accepted tunnel connection from {peer_address} on {}",
                     session.tunnel_address()
                 );
+
+                // Set the forward stream state to REQUESTED and proceed
+                // to send INCOMING connection message to the expose client.
+                session.request_forward_stream()?;
                 reader
                     .get_mut()
                     .write_all(crate::protocol::incoming_connection_message().as_bytes())?;
@@ -387,6 +431,7 @@ fn wait_for_expose_activity(
             }
         }
 
+        // Take the forward stream, and set the forward stream state to Empty.
         if let Some(forward_stream) = session.try_take_forward_stream()? {
             let tunnel_stream = pending_tunnel_connection
                 .take()
@@ -401,7 +446,6 @@ fn wait_for_expose_activity(
                     eprintln!("error: relay failed for session {session_id}: {error}");
                 }
             });
-            relay_started = true;
             println!("started server relay for session {session_id}");
         }
 
@@ -508,6 +552,9 @@ mod tests {
         let session = state
             .register_expose_session(peer_address(41000), 3000)
             .expect("expose should register");
+        state
+            .request_forward_stream(session.session_id())
+            .expect("forward request should be tracked");
         let (_first_client, first_server) = connected_stream_pair();
 
         state
@@ -527,6 +574,9 @@ mod tests {
         let session = state
             .register_expose_session(peer_address(41000), 3000)
             .expect("expose should register");
+        state
+            .request_forward_stream(session.session_id())
+            .expect("forward request should be tracked");
         let (client, server) = connected_stream_pair();
 
         state
@@ -546,6 +596,53 @@ mod tests {
             .try_take_forward_stream()
             .expect("second claim should succeed")
             .is_none());
+    }
+
+    #[test]
+    fn forward_stream_requires_waiting_tunnel_connection() {
+        let state = ServerState::new();
+        let session = state
+            .register_expose_session(peer_address(41000), 3000)
+            .expect("expose should register");
+        let (_client, server) = connected_stream_pair();
+
+        assert!(matches!(
+            state.attach_forward_stream(session.session_id(), server),
+            Err((AttachForwardError::NoPendingTunnel, _))
+        ));
+    }
+
+    #[test]
+    fn claimed_forward_stream_allows_next_forward_request() {
+        let state = ServerState::new();
+        let session = state
+            .register_expose_session(peer_address(41000), 3000)
+            .expect("expose should register");
+
+        state
+            .request_forward_stream(session.session_id())
+            .expect("first forward request should be tracked");
+        let (_first_client, first_server) = connected_stream_pair();
+        state
+            .attach_forward_stream(session.session_id(), first_server)
+            .expect("first forward stream should attach");
+        assert!(session
+            .try_take_forward_stream()
+            .expect("first claim should succeed")
+            .is_some());
+
+        state
+            .request_forward_stream(session.session_id())
+            .expect("second forward request should be tracked");
+        let (_second_client, second_server) = connected_stream_pair();
+
+        state
+            .attach_forward_stream(session.session_id(), second_server)
+            .expect("second forward stream should attach");
+        assert!(session
+            .try_take_forward_stream()
+            .expect("second claim should succeed")
+            .is_some());
     }
 
     #[test]

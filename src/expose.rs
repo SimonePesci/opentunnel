@@ -58,7 +58,6 @@ where
     F: FnMut() -> io::Result<T>,
 {
     let mut message = String::new();
-    let mut forward_connection = None;
 
     loop {
         message.clear();
@@ -72,15 +71,12 @@ where
 
         match crate::protocol::parse_control_message(&message) {
             Ok(crate::protocol::ControlMessage::IncomingConnection) => {
-                if forward_connection.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "forward connection already registered",
-                    ));
-                }
-
                 println!("incoming tunnel connection is waiting on the server");
-                forward_connection = Some(open_forward()?);
+                // Each INCOMING notification represents one waiting tunnel
+                // user, so the expose client opens one matching data channel.
+                // Dropping the JoinHandle is fine: the relay thread continues
+                // independently while the control connection listens for more.
+                let _forward_connection = open_forward()?;
                 println!("forward connection registered with server");
             }
             Err(_) => {
@@ -252,6 +248,19 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
         assert_eq!(forward_calls.get(), 1);
+    }
+
+    #[test]
+    fn repeated_incoming_messages_open_repeated_forward_connections() {
+        let forward_calls = Cell::new(0);
+        let error = monitor_control_connection(Cursor::new(b"INCOMING\nINCOMING\n"), || {
+            forward_calls.set(forward_calls.get() + 1);
+            Ok(())
+        })
+        .expect_err("EOF after valid messages should close the session");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(forward_calls.get(), 2);
     }
 
     #[test]
